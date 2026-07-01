@@ -340,9 +340,13 @@ function(build_dep)
 
     # Apply platform-specific overrides
     string(TOUPPER "${BD_OS}" _os)
+    string(TOUPPER "${BD_ARCH}" _arch)
     foreach(_key CMAKE_ARGS PATCHES)
         if(DEFINED DEP_${_key}_${_os})
             list(APPEND DEP_${_key} ${DEP_${_key}_${_os}})
+        endif()
+        if(DEFINED DEP_${_key}_${_os}_${_arch})
+            list(APPEND DEP_${_key} ${DEP_${_key}_${_os}_${_arch}})
         endif()
     endforeach()
 
