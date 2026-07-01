@@ -13,4 +13,8 @@ set(DEP_CMAKE_ARGS_WINDOWS_ARM64EC
     -DOPUS_DISABLE_INTRINSICS=ON
 )
 
+set(DEP_PATCHES
+    patch/0001-msvc-arm64ec-disable-x86-float-cast.patch
+)
+
 set(DEP_LICENSE_FILES COPYING)
