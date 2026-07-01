@@ -9,4 +9,8 @@ set(DEP_CMAKE_ARGS
     -DBUILD_SHARED_LIBS=ON
 )
 
+set(DEP_PATCHES
+    patch/0001-msvc-arm64ec-disable-x86-fpu-path.patch
+)
+
 set(DEP_LICENSE_FILES COPYING)
