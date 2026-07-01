@@ -1,7 +1,7 @@
 # build_platform.cmake - build every buildable recipe for a single platform.
 #
 # Usage (CI or local):
-#   cmake -DOS=<macos|linux|windows> -DARCH=<x86_64|aarch64|universal> \
+#   cmake -DOS=<macos|linux|windows> -DARCH=<x86_64|aarch64|arm64ec|universal> \
 #         -P buildtools/build_platform.cmake
 #
 # Output goes to .build/platform/out/:
@@ -13,7 +13,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 if(NOT DEFINED OS OR NOT DEFINED ARCH)
-    message(FATAL_ERROR "Required: -DOS=<macos|linux|windows> -DARCH=<x86_64|aarch64|universal>")
+    message(FATAL_ERROR "Required: -DOS=<macos|linux|windows> -DARCH=<x86_64|aarch64|arm64ec|universal>")
 endif()
 
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}" DIRECTORY)
@@ -31,11 +31,13 @@ file(MAKE_DIRECTORY "${STAGE}")
 file(GLOB _specs "${RECIPES_ROOT}/*/spec.cmake")
 list(SORT _specs)
 set(ALL "")
+set(TOOLS "")
 foreach(_spec ${_specs})
     unset(DEP_SOURCE_URL)
     unset(DEP_DEPENDS)
     unset(DEP_PLATFORMS)
     unset(DEP_VERSION)
+    unset(DEP_KIND)
     include("${_spec}")
 
     # Skip if no source is defined

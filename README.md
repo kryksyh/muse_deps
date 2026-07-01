@@ -304,7 +304,7 @@ cmake -DOS=windows -DARCH=x86_64 -P buildtools/build_platform.cmake
 ```
 
 OS values: `macos`, `linux`, `windows`. Arch values: `x86_64`, `aarch64`,
-`universal` where applicable.
+`arm64ec`, `universal` where applicable.
 
 `build_platform.cmake` finds every recipe with `DEP_SOURCE_URL` (skipping
 source-delivery deps), builds tools first and adds them to `PATH`, builds
