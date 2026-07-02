@@ -55,3 +55,15 @@ diff --color -ruN sa/src/pffft.c sb/src/pffft.c
  #    define PFFFT_SIMD_DISABLE /* fallback to scalar code */
  #  endif
  #endif
+diff --color -ruN sa/src/rint.h sb/src/rint.h
+--- sa/src/rint.h	2026-06-12 18:02:49.161298559 +0300
++++ sb/src/rint.h	2026-06-12 18:02:49.164014138 +0300
+@@ -55,7 +55,7 @@
+     __asm fldenv status
+     return 0;
+   }
+-#elif defined _MSC_VER && defined _M_X64
++#elif defined _MSC_VER && defined _M_X64 && !defined(_M_ARM64EC)
+   #include <emmintrin.h>
+   #include <float.h>
+   #define FPU_RINT32
