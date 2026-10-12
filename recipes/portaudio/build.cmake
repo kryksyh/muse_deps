@@ -12,7 +12,9 @@ if(BD_OS STREQUAL "windows" AND _asiosdk_src)
         message(FATAL_ERROR "[${BD_NAME}] asiosdk source at ${_asiosdk_src} has no common/asio.h")
     endif()
     message(STATUS "[${BD_NAME}] ASIO enabled, SDK root: ${_asiosdk_root}")
-    list(APPEND DEP_CMAKE_ARGS -DPA_USE_ASIO=ON "-DASIOSDK_ROOT_DIR=${_asiosdk_root}")
+    # FindASIO looks for <build dir>/asiosdk*/common/asio.h
+    file(COPY "${_asiosdk_root}/" DESTINATION "${BUILD}/asiosdk")
+    list(APPEND DEP_CMAKE_ARGS -DPA_USE_ASIO=ON)
 endif()
 
 _bd_cmake_build("${SRC}")

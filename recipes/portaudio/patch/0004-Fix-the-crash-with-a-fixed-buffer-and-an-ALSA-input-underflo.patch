@@ -1,0 +1,11 @@
+diff --color -ruN 3/src/common/pa_process.c 4/src/common/pa_process.c
+--- 3/src/common/pa_process.c	2026-10-10 11:17:50.000000000 +0300
++++ 4/src/common/pa_process.c	2026-10-10 11:17:50.000000000 +0300
+@@ -461,6 +461,7 @@
+     assert( bp->inputChannelCount > 0 );
+ 
+     bp->hostInputChannels[0][0].data = 0;
++    bp->hostInputFrameCount[0] = 0;
+ }
+ 
+ 

@@ -1,0 +1,178 @@
+diff --color -ruN 9/include/pa_win_wasapi.h 10/include/pa_win_wasapi.h
+--- 9/include/pa_win_wasapi.h	2026-10-12 13:22:28.000000000 +0300
++++ 10/include/pa_win_wasapi.h	2026-10-12 13:22:28.000000000 +0300
+@@ -88,12 +88,20 @@
+        refer to Microsoft documentation "Representing Formats for IEC 61937 Transmissions" for more
+        details about data representation and stream configuration */
+     paWinWasapiPassthrough              = (1 << 7),
++
++    /* Shared mode on Windows 10 and later: run the system mixer at the period nearest to the
++       suggested latency (0: the shortest) that the driver offers below its default period, through
++       IAudioClient3. A full-duplex output takes its input's period; without a requested buffer
++       size the callback follows the period. Drivers without support give the default period.
++       The period applies to all streams of the device while the stream is open. */
++    paWinWasapiSharedLowLatency         = (1 << 8),
+ }
+ PaWasapiFlags;
+ #define paWinWasapiExclusive             (paWinWasapiExclusive)
+ #define paWinWasapiRedirectHostProcessor (paWinWasapiRedirectHostProcessor)
+ #define paWinWasapiUseChannelMask        (paWinWasapiUseChannelMask)
+ #define paWinWasapiPolling               (paWinWasapiPolling)
++#define paWinWasapiSharedLowLatency      (paWinWasapiSharedLowLatency)
+ #define paWinWasapiThreadPriority        (paWinWasapiThreadPriority)
+ #define paWinWasapiExplicitSampleFormat  (paWinWasapiExplicitSampleFormat)
+ #define paWinWasapiAutoConvert           (paWinWasapiAutoConvert)
+diff --color -ruN 9/src/hostapi/wasapi/pa_win_wasapi.c 10/src/hostapi/wasapi/pa_win_wasapi.c
+--- 9/src/hostapi/wasapi/pa_win_wasapi.c	2026-10-12 13:22:28.000000000 +0300
++++ 10/src/hostapi/wasapi/pa_win_wasapi.c	2026-10-12 13:22:28.000000000 +0300
+@@ -568,6 +568,7 @@
+     UINT32               framesPerHostCallback;
+     AUDCLNT_SHAREMODE    shareMode;
+     UINT32               streamFlags; // AUDCLNT_STREAMFLAGS_EVENTCALLBACK, ...
++    UINT32               sharedLowLatencyFrames; //!< engine period of an IAudioClient3 shared stream, 0 if unused
+     UINT32               flags;
+     PaWasapiAudioClientParams params; //!< parameters
+ 
+@@ -3354,6 +3355,30 @@
+ }
+ 
+ // ------------------------------------------------------------------------------------------
++#ifdef __IAudioClient3_INTERFACE_DEFINED__
++// Windows 10 runs the shared engine at a shorter period than its default (10 ms) where the driver
++// supports it. Returns the period to request in frames, 0 if none is shorter than the default.
++static UINT32 _GetSharedLowLatencyPeriod(IAudioClient *client, const WAVEFORMATEX *format, UINT32 requestedFrames)
++{
++    UINT32 defaultFrames = 0, fundamentalFrames = 0, minFrames = 0, maxFrames = 0, frames;
++    HRESULT hr;
++
++    if ((requestedFrames == 0) || (GetAudioClientVersion() < 3))
++        return 0;
++    hr = IAudioClient3_GetSharedModeEnginePeriod((IAudioClient3 *)client, format, &defaultFrames,
++            &fundamentalFrames, &minFrames, &maxFrames);
++    PRINT(("WASAPI: shared engine periods: requested %u, default %u, fundamental %u, min %u, max %u (hr 0x%08X)\n",
++        requestedFrames, defaultFrames, fundamentalFrames, minFrames, maxFrames, (unsigned)hr));
++    if (FAILED(hr) || (fundamentalFrames == 0))
++        return 0;
++
++    frames = max(requestedFrames, minFrames);
++    frames = ((frames + fundamentalFrames - 1) / fundamentalFrames) * fundamentalFrames;
++    frames = min(frames, maxFrames);
++    return (frames < defaultFrames ? frames : 0);
++}
++#endif
++
+ static HRESULT CreateAudioClient(const PaDeviceInfo *baseDeviceInfo, PaWasapiStream *pStream,
+     PaWasapiSubStream *pSub, BOOL output, PaError *pa_error)
+ {
+@@ -3367,6 +3392,8 @@
+     UINT32 framesPerLatency          = userFramesPerBuffer;
+     IAudioClient *audioClient        = NULL;
+     REFERENCE_TIME eventPeriodicity  = 0;
++    UINT32 sharedRequestedFrames     = 0;
++    UINT32 sharedPeriodFrames        = 0;
+ 
+     // Assume default failure due to some reason
+     (*pa_error) = paInvalidDevice;
+@@ -3448,6 +3475,16 @@
+     if (output && fullDuplex)
+         framesPerLatency = pStream->in.framesPerHostCallback;
+ 
++    // paWinWasapiSharedLowLatency: the engine period follows the suggested latency, as framesPerLatency
++    // holds a default user buffer and double buffering; 0 asks for the shortest period. A
++    // full-duplex output takes the period of its input.
++    if ((pSub->shareMode == AUDCLNT_SHAREMODE_SHARED) && (pSub->params.wasapi_params.flags & paWinWasapiSharedLowLatency))
++    {
++        sharedRequestedFrames = max(1, (UINT32)(params->suggestedLatency * pSub->wavexu.ext.Format.nSamplesPerSec));
++        if (output && fullDuplex)
++            sharedRequestedFrames = pStream->in.sharedLowLatencyFrames;
++    }
++
+     // Avoid 0 frames
+     if (framesPerLatency == 0)
+         framesPerLatency = MakeFramesFromHns(deviceInfo->DefaultDevicePeriod, pSub->wavexu.ext.Format.nSamplesPerSec);
+@@ -3535,14 +3572,46 @@
+     // Set device scheduling period (always 0 in Shared mode according to Microsoft docs)
+     _CalculatePeriodicity(pSub, output, &eventPeriodicity);
+ 
++    pSub->sharedLowLatencyFrames = 0;
++#ifdef __IAudioClient3_INTERFACE_DEFINED__
++    if (pSub->shareMode == AUDCLNT_SHAREMODE_SHARED)
++        sharedPeriodFrames = _GetSharedLowLatencyPeriod(audioClient, &pSub->wavexu.ext.Format, sharedRequestedFrames);
++    if (sharedPeriodFrames != 0)
++    {
++        hr = IAudioClient3_InitializeSharedAudioStream((IAudioClient3 *)audioClient, pSub->streamFlags,
++            sharedPeriodFrames, &pSub->wavexu.ext.Format, NULL);
++        if (SUCCEEDED(hr))
++        {
++            pSub->sharedLowLatencyFrames = sharedPeriodFrames;
++            pSub->period = MakeHnsPeriod(sharedPeriodFrames, pSub->wavexu.ext.Format.nSamplesPerSec);
++            PRINT(("WASAPI: CreateAudioClient: shared engine period %d frames\n", sharedPeriodFrames));
++        }
++        else
++        {
++            // For example another client holds the engine at its own period; a client that failed
++            // to initialize cannot be initialized again
++            PRINT(("WASAPI: CreateAudioClient: InitializeSharedAudioStream(%u frames) failed (hr 0x%08X), using the default period\n",
++                sharedPeriodFrames, (unsigned)hr));
++            SAFE_RELEASE(audioClient);
++            if (FAILED(hr = ActivateAudioInterface(deviceInfo, &pSub->params.wasapi_params, &audioClient)))
++            {
++                (*pa_error) = paInsufficientMemory;
++                LogHostError(hr);
++                goto done;
++            }
++        }
++    }
++#endif
++
+     // Open the stream and associate it with an audio session
+-    hr = IAudioClient_Initialize(audioClient,
+-        pSub->shareMode,
+-        pSub->streamFlags,
+-        pSub->period,
+-        eventPeriodicity,
+-        &pSub->wavexu.ext.Format,
+-        NULL);
++    if (pSub->sharedLowLatencyFrames == 0)
++        hr = IAudioClient_Initialize(audioClient,
++            pSub->shareMode,
++            pSub->streamFlags,
++            pSub->period,
++            eventPeriodicity,
++            &pSub->wavexu.ext.Format,
++            NULL);
+ 
+     // [Output only] Check if buffer size is the one we requested in Exclusive mode, for UAC1 USB DACs WASAPI
+     // can allocate internal buffer equal to 8 times of pSub->period that has to be corrected in order to match
+@@ -3801,6 +3870,7 @@
+     PaUtilHostBufferSizeMode bufferMode;
+     const BOOL fullDuplex = ((inputParameters != NULL) && (outputParameters != NULL));
+     BOOL useInputBufferProcessor = (inputParameters != NULL), useOutputBufferProcessor = (outputParameters != NULL);
++    const BOOL framesPerBufferUnspecified = (framesPerBuffer == paFramesPerBufferUnspecified);
+ 
+     // validate PaStreamParameters
+     if ((result = IsStreamParamsValid(hostApi, inputParameters, outputParameters, sampleRate)) != paNoError)
+@@ -4161,6 +4231,23 @@
+         }*/
+     }
+ 
++    // Without a requested buffer size the callback takes the shorter engine period of an IAudioClient3
++    // shared stream, not the default period: a larger user buffer would hold the gain back
++    if (framesPerBufferUnspecified)
++    {
++        const UINT32 lowLatencyFrames = (stream->in.sharedLowLatencyFrames != 0 ?
++            stream->in.sharedLowLatencyFrames : stream->out.sharedLowLatencyFrames);
++        if (lowLatencyFrames != 0)
++        {
++            framesPerBuffer = lowLatencyFrames;
++            if ((inputParameters != NULL) && !stream->in.userBufferAndHostMatch)
++                stream->in.framesPerBuffer = lowLatencyFrames;
++            if ((outputParameters != NULL) && !stream->out.userBufferAndHostMatch)
++                stream->out.framesPerBuffer = lowLatencyFrames;
++            PRINT(("WASAPI::OpenStream: user buffer follows the shared engine period: %u frames\n", lowLatencyFrames));
++        }
++    }
++
+     // Calculate frames per host for processor
+     framesPerHostCallback = (outputParameters ? stream->out.framesPerBuffer : stream->in.framesPerBuffer);
+ 

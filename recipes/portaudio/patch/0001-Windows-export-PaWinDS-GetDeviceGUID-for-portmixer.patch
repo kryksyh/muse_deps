@@ -1,0 +1,70 @@
+diff --color -ruN 0/cmake/portaudio.def.in 1/cmake/portaudio.def.in
+--- 0/cmake/portaudio.def.in	2026-10-10 11:17:49.000000000 +0300
++++ 1/cmake/portaudio.def.in	2026-10-10 11:17:50.000000000 +0300
+@@ -66,4 +66,5 @@
+ @DEF_EXCLUDE_WMME_SYMBOLS@PaWinMME_GetStreamOutputHandleCount   @73
+ @DEF_EXCLUDE_WMME_SYMBOLS@PaWinMME_GetStreamOutputHandle        @74
+ @DEF_EXCLUDE_WASAPI_SYMBOLS@PaWasapi_IsLoopback                 @75
++@DEF_EXCLUDE_WINDS_SYMBOLS@PaWinDS_GetDeviceGUID                @76
+ ; add new host-API-specific public functions here. DO NOT CHANGE EXISTING ORDINALS!
+diff --color -ruN 0/CMakeLists.txt 1/CMakeLists.txt
+--- 0/CMakeLists.txt	2026-10-10 11:17:49.000000000 +0300
++++ 1/CMakeLists.txt	2026-10-10 11:17:50.000000000 +0300
+@@ -256,6 +256,8 @@
+     if(NOT MINGW)
+       target_compile_definitions(portaudio PRIVATE PAWIN_USE_DIRECTSOUNDFULLDUPLEXCREATE)
+     endif()
++  else()
++    set(DEF_EXCLUDE_WINDS_SYMBOLS ";")
+   endif()
+ 
+   option(PA_USE_WMME "Enable support for WMME" ON)
+diff --color -ruN 0/include/pa_win_ds.h 1/include/pa_win_ds.h
+--- 0/include/pa_win_ds.h	2026-10-10 11:17:49.000000000 +0300
++++ 1/include/pa_win_ds.h	2026-10-10 11:17:50.000000000 +0300
+@@ -87,6 +87,9 @@
+ }PaWinDirectSoundStreamInfo;
+ 
+ 
++/** The DirectSound GUID of a device, for portmixer; NULL for the primary device. */
++PaError PaWinDS_GetDeviceGUID( PaDeviceIndex device, GUID** pGUID );
++
+ 
+ #ifdef __cplusplus
+ }
+diff --color -ruN 0/src/hostapi/dsound/pa_win_ds.c 1/src/hostapi/dsound/pa_win_ds.c
+--- 0/src/hostapi/dsound/pa_win_ds.c	2026-10-10 11:17:49.000000000 +0300
++++ 1/src/hostapi/dsound/pa_win_ds.c	2026-10-10 11:17:50.000000000 +0300
+@@ -3232,3 +3232,32 @@
+ 
+     return 0;
+ }
++
++static PaError GetDirectSoundDeviceInfoByDeviceIndex( PaWinDsDeviceInfo** info, PaDeviceIndex device )
++{
++    PaError ret;
++    PaDeviceIndex index;
++    PaUtilHostApiRepresentation* pApi;
++
++    if( (ret = PaUtil_GetHostApiRepresentation( &pApi, paDirectSound )) != paNoError )
++        return ret;
++    if( pApi == NULL )
++        return paNotInitialized;
++    if( (ret = PaUtil_DeviceIndexToHostApiDeviceIndex( &index, device, pApi )) != paNoError )
++        return ret;
++    if( (UINT32)index >= (UINT32)pApi->info.deviceCount )
++        return paInvalidDevice;
++
++    *info = (PaWinDsDeviceInfo*)pApi->deviceInfos[index];
++    return paNoError;
++}
++
++PaError PaWinDS_GetDeviceGUID( PaDeviceIndex device, GUID** pGUID )
++{
++    PaWinDsDeviceInfo* deviceInfo;
++    PaError ret = GetDirectSoundDeviceInfoByDeviceIndex( &deviceInfo, device );
++
++    if( ret == paNoError )
++        *pGUID = deviceInfo->lpGUID;
++    return ret;
++}

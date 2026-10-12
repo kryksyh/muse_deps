@@ -1,0 +1,18 @@
+diff --color -ruN 6/src/hostapi/coreaudio/pa_mac_core.c 7/src/hostapi/coreaudio/pa_mac_core.c
+--- 6/src/hostapi/coreaudio/pa_mac_core.c	2026-10-12 13:22:24.000000000 +0300
++++ 7/src/hostapi/coreaudio/pa_mac_core.c	2026-10-12 13:22:28.000000000 +0300
+@@ -2002,8 +2002,12 @@
+             if( stream->outputUnit )
+                 PaUtil_AdvanceRingBufferWriteIndex( &stream->inputRingBuffer, ringSize / RING_BUFFER_ADVANCE_DENOMINATOR );
+ 
+-            // Just adds to input latency between input device and PA full duplex callback.
+-            inputLatencyFrames += ringSize;
++            /* Input waits in the ring between the input device and the full duplex callback.
++               With a callback, SyncInputRing() trims the ring at start to one host buffer more
++               than a callback reads: that buffer is the wait, not the ring's whole size. */
++            inputLatencyFrames += streamCallback
++                    ? MAX( stream->inputFramesPerBuffer, stream->outputFramesPerBuffer )
++                    : ringSize;
+         }
+     }
+ 

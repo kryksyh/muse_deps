@@ -1,0 +1,26 @@
+diff --color -ruN 5/src/hostapi/coreaudio/pa_mac_core.c 6/src/hostapi/coreaudio/pa_mac_core.c
+--- 5/src/hostapi/coreaudio/pa_mac_core.c	2026-10-12 13:22:12.000000000 +0300
++++ 6/src/hostapi/coreaudio/pa_mac_core.c	2026-10-12 13:22:24.000000000 +0300
+@@ -2869,15 +2869,18 @@
+ // until all data is flushed.
+ static ComponentResult BlockWhileAudioUnitIsRunning( AudioUnit audioUnit, AudioUnitElement element )
+ {
+-    Boolean isRunning = 1;
+-    while( isRunning ) {
++    /* Check first: the unit has normally stopped already, and a 100 ms sleep per check
++       made every stop of a two-device stream take 200 ms or more. */
++    for( ;; ) {
++        Boolean isRunning = 0;
+         UInt32 s = sizeof( isRunning );
+         ComponentResult err = AudioUnitGetProperty( audioUnit, kAudioOutputUnitProperty_IsRunning, kAudioUnitScope_Global, element,  &isRunning, &s );
+         if( err )
+             return err;
+-        Pa_Sleep( 100 );
++        if( !isRunning )
++            return noErr;
++        Pa_Sleep( 1 );
+     }
+-    return noErr;
+ }
+ 
+ static PaError FinishStoppingStream( PaMacCoreStream *stream )

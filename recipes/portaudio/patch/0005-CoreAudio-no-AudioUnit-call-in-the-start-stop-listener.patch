@@ -1,0 +1,77 @@
+diff --color -ruN 4/src/hostapi/coreaudio/pa_mac_core_internal.h 5/src/hostapi/coreaudio/pa_mac_core_internal.h
+--- 4/src/hostapi/coreaudio/pa_mac_core_internal.h	2026-10-10 11:17:50.000000000 +0300
++++ 5/src/hostapi/coreaudio/pa_mac_core_internal.h	2026-10-12 13:22:12.000000000 +0300
+@@ -158,6 +158,7 @@
+     AudioTimeStamp startTime;
+     /* FIXME: instead of volatile, these should be properly memory barriered */
+     volatile uint32_t xrunFlags; /*PaStreamCallbackFlags*/
++    volatile int32_t finishedArmed; /* the finished callback is due for this start */
+ 
+     /* Separate input and output devices: timing of the input ring buffer.
+        The input ioproc publishes the ADC time of each block it writes; the
+diff --color -ruN 4/src/hostapi/coreaudio/pa_mac_core.c 5/src/hostapi/coreaudio/pa_mac_core.c
+--- 4/src/hostapi/coreaudio/pa_mac_core.c	2026-10-10 11:17:50.000000000 +0300
++++ 5/src/hostapi/coreaudio/pa_mac_core.c	2026-10-12 13:22:12.000000000 +0300
+@@ -358,8 +358,20 @@
+ #define PA_AUHAL_SET_LAST_HOST_ERROR( errorCode, errorText ) \
+     PaUtil_SetLastHostErrorInfo( paCoreAudio, errorCode, errorText )
+ 
++static void NotifyStreamFinished( PaMacCoreStream *stream )
++{
++    PaStreamFinishedCallback *sfc = stream->streamRepresentation.streamFinishedCallback;
++    if( OSAtomicCompareAndSwap32( 1, 0, &stream->finishedArmed ) && sfc )
++        sfc( stream->streamRepresentation.userData );
++}
++
+ /*
+  * Callback called when starting or stopping a stream.
++ *
++ * CoreAudio can call it on the IO thread while it holds the IO context lock. An AudioUnit
++ * call here (IsRunning) then deadlocks against AudioOutputUnitStop() on another thread, so
++ * the stream state tells what happened. Pa_StopStream() and Pa_AbortStream() report the end
++ * in FinishStoppingStream(); a stop that PortAudio did not ask for is not reported.
+  */
+ static void startStopCallback(
+     void *               inRefCon,
+@@ -369,23 +381,8 @@
+     AudioUnitElement     inElement )
+ {
+     PaMacCoreStream *stream = (PaMacCoreStream *) inRefCon;
+-    UInt32 isRunning;
+-    UInt32 size = sizeof( isRunning );
+-    OSStatus err;
+-    err = AudioUnitGetProperty( ci, kAudioOutputUnitProperty_IsRunning, inScope, inElement, &isRunning, &size );
+-    assert( !err );
+-    if( err )
+-        isRunning = false; //it's very unclear what to do in case of error here. There's no real way to notify the user, and crashing seems unreasonable.
+-    if( isRunning )
+-        return; //We are only interested in when we are stopping
+-    // -- if we are using 2 I/O units, we only need one notification!
+-    if( stream->inputUnit && stream->outputUnit && stream->inputUnit != stream->outputUnit && ci == stream->inputUnit )
+-        return;
+-    PaStreamFinishedCallback *sfc = stream->streamRepresentation.streamFinishedCallback;
+-    if( stream->state == STOPPING )
+-        stream->state = STOPPED ;
+-    if( sfc )
+-        sfc( stream->streamRepresentation.userData );
++    if( stream->state == CALLBACK_STOPPED )
++        NotifyStreamFinished( stream );
+ }
+ 
+ 
+@@ -2855,6 +2852,7 @@
+         if( AudioConverterGetProperty( stream->inputSRConverter, kAudioConverterPrimeInfo, &size, &prime ) == noErr )
+             stream->converterLeadingFrames = prime.leadingFrames;
+     }
++    stream->finishedArmed = 1;
+     stream->state = ACTIVE;
+     if( stream->inputUnit ) {
+         ERR_WRAP( AudioOutputUnitStart(stream->inputUnit) );
+@@ -2932,6 +2930,7 @@
+     if( paErr )
+         return paErr;
+ 
++    NotifyStreamFinished( stream );
+     VDBUG( ( "Stream Stopped.\n" ) );
+     return paNoError;
+ #undef ERR_WRAP

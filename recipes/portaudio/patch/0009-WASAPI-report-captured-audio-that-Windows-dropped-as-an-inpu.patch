@@ -1,0 +1,65 @@
+diff --color -ruN 8/src/hostapi/wasapi/pa_win_wasapi.c 9/src/hostapi/wasapi/pa_win_wasapi.c
+--- 8/src/hostapi/wasapi/pa_win_wasapi.c	2026-10-12 13:22:28.000000000 +0300
++++ 9/src/hostapi/wasapi/pa_win_wasapi.c	2026-10-12 13:22:28.000000000 +0300
+@@ -661,6 +661,11 @@
+     // State handler
+     PaWasapiStreamStateCallback fnStateHandler;
+     void *pStateHandlerUserData;
++
++    // Status flags for the next callback; set and read by the processing thread only
++    PaStreamCallbackFlags pendingFlags;
++    // WASAPI marks the first packet after start as a discontinuity: it is no lost input
++    BOOL inputPacketReceived;
+ }
+ PaWasapiStream;
+ 
+@@ -4471,6 +4476,8 @@
+         return paStreamIsNotStopped;
+ 
+     PaUtil_ResetBufferProcessor(&stream->bufferProcessor);
++    stream->pendingFlags = 0;
++    stream->inputPacketReceived = FALSE;
+ 
+     // Cleanup handles (may be necessary if stream was stopped by itself due to error)
+     _StreamCleanup(stream);
+@@ -5091,13 +5098,14 @@
+ {
+     PaWasapiStream *stream = (PaWasapiStream*)userData;
+     PaStreamCallbackTimeInfo timeInfo = {0,0,0};
+-    PaStreamCallbackFlags flags = 0;
++    PaStreamCallbackFlags flags = stream->pendingFlags;
+     int callbackResult;
+     unsigned long framesProcessed;
+     HRESULT hr;
+     UINT32 pending;
+ 
+     PaUtil_BeginCpuLoadMeasurement( &stream->cpuLoadMeasurer );
++    stream->pendingFlags = 0;
+ 
+     /*
+         Pa_GetStreamTime:
+@@ -5812,6 +5820,11 @@
+         // if (flags & AUDCLNT_BUFFERFLAGS_SILENT)
+         //    data = NULL;
+ 
++        // Windows dropped captured audio before this packet
++        if ((flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) && stream->inputPacketReceived)
++            stream->pendingFlags |= paInputOverflow;
++        stream->inputPacketReceived = TRUE;
++
+         // Apply mixer if activated
+         if (stream->in.monoMixer != NULL)
+         {
+@@ -6501,6 +6514,12 @@
+                             i_data = (BYTE *)stream->in.monoBuffer;
+                         }
+ 
++                        // Windows dropped captured audio before this packet; a packet that waits for
++                        // output space comes again with the same flags, so check only here
++                        if ((i_flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) && stream->inputPacketReceived)
++                            stream->pendingFlags |= paInputOverflow;
++                        stream->inputPacketReceived = TRUE;
++
+                         // Process
+                         processor[S_FULLDUPLEX].processor(i_data, i_processed, o_data, o_processed, processor[S_FULLDUPLEX].userData);
+ 

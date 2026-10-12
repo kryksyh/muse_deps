@@ -1,0 +1,267 @@
+diff --color -ruN 7/src/hostapi/coreaudio/pa_mac_core_internal.h 8/src/hostapi/coreaudio/pa_mac_core_internal.h
+--- 7/src/hostapi/coreaudio/pa_mac_core_internal.h	2026-10-12 13:22:28.000000000 +0300
++++ 8/src/hostapi/coreaudio/pa_mac_core_internal.h	2026-10-12 13:22:28.000000000 +0300
+@@ -144,6 +144,7 @@
+     AudioUnit outputUnit;
+     AudioDeviceID inputDevice;
+     AudioDeviceID outputDevice;
++    AudioDeviceID aggregateDevice; /* our private aggregate of the input and output device, or 0 */
+     size_t userInChan;
+     size_t userOutChan;
+     size_t inputFramesPerBuffer;
+diff --color -ruN 7/src/hostapi/coreaudio/pa_mac_core.c 8/src/hostapi/coreaudio/pa_mac_core.c
+--- 7/src/hostapi/coreaudio/pa_mac_core.c	2026-10-12 13:22:28.000000000 +0300
++++ 8/src/hostapi/coreaudio/pa_mac_core.c	2026-10-12 13:22:28.000000000 +0300
+@@ -352,7 +352,8 @@
+                                          AudioConverterRef *srConverter,
+                                          AudioDeviceID *audioDevice,
+                                          const double sampleRate,
+-                                         void *refCon );
++                                         void *refCon,
++                                         AudioDeviceID aggregateDevice );
+ 
+ /* for setting errors. */
+ #define PA_AUHAL_SET_LAST_HOST_ERROR( errorCode, errorText ) \
+@@ -1218,7 +1219,8 @@
+         AudioConverterRef *srConverter,
+         AudioDeviceID *audioDevice,
+         const double sampleRate,
+-        void *refCon )
++        void *refCon,
++        AudioDeviceID aggregateDevice )
+ {
+     AudioComponentDescription desc;
+     AudioComponent comp;
+@@ -1334,13 +1336,13 @@
+     /* -- set the devices -- */
+     /* make sure input and output are the same device if we are doing input and
+        output. */
+-    if( inStreamParams && outStreamParams )
++    if( inStreamParams && outStreamParams && !aggregateDevice )
+     {
+         assert( outStreamParams->device == inStreamParams->device );
+     }
+     if( inStreamParams )
+     {
+-        *audioDevice = auhalHostApi->devIds[inStreamParams->device] ;
++        *audioDevice = aggregateDevice ? aggregateDevice : auhalHostApi->devIds[inStreamParams->device] ;
+         ERR_WRAP( AudioUnitSetProperty( *audioUnit,
+                                         kAudioOutputUnitProperty_CurrentDevice,
+                                         kAudioUnitScope_Global,
+@@ -1350,7 +1352,7 @@
+     }
+     if( outStreamParams && outStreamParams != inStreamParams )
+     {
+-        *audioDevice = auhalHostApi->devIds[outStreamParams->device] ;
++        *audioDevice = aggregateDevice ? aggregateDevice : auhalHostApi->devIds[outStreamParams->device] ;
+         ERR_WRAP( AudioUnitSetProperty( *audioUnit,
+                                         kAudioOutputUnitProperty_CurrentDevice,
+                                         kAudioUnitScope_Global,
+@@ -1655,6 +1657,97 @@
+ 
+ /* =================================================================================================== */
+ 
++static CFStringRef CopyDeviceUID( AudioDeviceID device )
++{
++    AudioObjectPropertyAddress address = { kAudioDevicePropertyDeviceUID,
++                                           kAudioObjectPropertyScopeGlobal,
++                                           kAudioObjectPropertyElementMaster };
++    CFStringRef uid = NULL;
++    UInt32 size = sizeof( uid );
++    if( AudioObjectGetPropertyData( device, &address, 0, NULL, &size, &uid ) != noErr )
++        return NULL;
++    return uid;
++}
++
++static void SetInt( CFMutableDictionaryRef dictionary, const char *key, int value )
++{
++    CFStringRef k = CFStringCreateWithCString( NULL, key, kCFStringEncodingUTF8 );
++    CFNumberRef v = CFNumberCreate( NULL, kCFNumberIntType, &value );
++    CFDictionarySetValue( dictionary, k, v );
++    CFRelease( v );
++    CFRelease( k );
++}
++
++static void SetValue( CFMutableDictionaryRef dictionary, const char *key, CFTypeRef value )
++{
++    CFStringRef k = CFStringCreateWithCString( NULL, key, kCFStringEncodingUTF8 );
++    CFDictionarySetValue( dictionary, k, value );
++    CFRelease( k );
++}
++
++/* The aggregate device's channels are the two devices' channels: a channel map would need
++   them mapped through. */
++static int HasChannelMap( const PaStreamParameters *parameters )
++{
++    const PaMacCoreStreamInfo *info = (const PaMacCoreStreamInfo *)parameters->hostApiSpecificStreamInfo;
++    return info && info->channelMap;
++}
++
++/* A device for output and one for input as one private aggregate device: one audio unit and
++   one IO cycle serve both directions, so Core Audio keeps input and output aligned and no ring
++   buffer waits between them. The output device clocks it; the input device is drift
++   compensated. Returns kAudioObjectUnknown if Core Audio does not create it. */
++static AudioDeviceID CreateAggregateDevice( AudioDeviceID outputDevice, AudioDeviceID inputDevice )
++{
++    static int32_t count = 0;
++    AudioDeviceID aggregate = kAudioObjectUnknown;
++    CFStringRef outputUID = CopyDeviceUID( outputDevice );
++    CFStringRef inputUID = CopyDeviceUID( inputDevice );
++    if( outputUID && inputUID )
++    {
++        CFMutableDictionaryRef outputSub = CFDictionaryCreateMutable( NULL, 0, &kCFTypeDictionaryKeyCallBacks,
++                                                                      &kCFTypeDictionaryValueCallBacks );
++        CFMutableDictionaryRef inputSub = CFDictionaryCreateMutable( NULL, 0, &kCFTypeDictionaryKeyCallBacks,
++                                                                     &kCFTypeDictionaryValueCallBacks );
++        CFMutableDictionaryRef description = CFDictionaryCreateMutable( NULL, 0, &kCFTypeDictionaryKeyCallBacks,
++                                                                        &kCFTypeDictionaryValueCallBacks );
++        CFStringRef uid = CFStringCreateWithFormat( NULL, NULL, CFSTR( "org.portaudio.duplex.%d.%d" ),
++                                                    (int)getpid(), (int)OSAtomicIncrement32( &count ) );
++        const void *subDevices[2];
++        CFArrayRef subDeviceList;
++
++        SetValue( outputSub, kAudioSubDeviceUIDKey, outputUID );
++        SetInt( outputSub, kAudioSubDeviceDriftCompensationKey, 0 );
++        SetValue( inputSub, kAudioSubDeviceUIDKey, inputUID );
++        SetInt( inputSub, kAudioSubDeviceDriftCompensationKey, 1 );
++        subDevices[0] = outputSub;
++        subDevices[1] = inputSub;
++        subDeviceList = CFArrayCreate( NULL, subDevices, 2, &kCFTypeArrayCallBacks );
++
++        SetValue( description, kAudioAggregateDeviceNameKey, CFSTR( "PortAudio duplex" ) );
++        SetValue( description, kAudioAggregateDeviceUIDKey, uid );
++        SetInt( description, kAudioAggregateDeviceIsPrivateKey, 1 );
++        SetValue( description, kAudioAggregateDeviceSubDeviceListKey, subDeviceList );
++        SetValue( description, kAudioAggregateDeviceMasterSubDeviceKey, outputUID );
++#ifdef kAudioAggregateDeviceClockDeviceKey
++        SetValue( description, kAudioAggregateDeviceClockDeviceKey, outputUID );
++#endif
++        if( AudioHardwareCreateAggregateDevice( description, &aggregate ) != noErr )
++            aggregate = kAudioObjectUnknown;
++
++        CFRelease( subDeviceList );
++        CFRelease( uid );
++        CFRelease( description );
++        CFRelease( inputSub );
++        CFRelease( outputSub );
++    }
++    if( outputUID )
++        CFRelease( outputUID );
++    if( inputUID )
++        CFRelease( inputUID );
++    return aggregate;
++}
++
+ static UInt32 CalculateOptimalBufferSize( PaMacAUHAL *auhalHostApi,
+                                           const PaStreamParameters *inputParameters,
+                                           const PaStreamParameters *outputParameters,
+@@ -1891,7 +1984,8 @@
+                                            &(stream->inputSRConverter),
+                                            &(stream->inputDevice),
+                                            sampleRate,
+-                                           stream );
++                                           stream,
++                                           kAudioObjectUnknown );
+         stream->inputFramesPerBuffer = inputFramesPerBuffer;
+         stream->outputFramesPerBuffer = outputFramesPerBuffer;
+         stream->outputUnit = stream->inputUnit;
+@@ -1903,6 +1997,52 @@
+     {   /* full duplex, different devices OR simplex */
+         UInt32 outputFramesPerBuffer = (UInt32) stream->outputFramesPerBuffer;
+         UInt32 inputFramesPerBuffer  = (UInt32) stream->inputFramesPerBuffer;
++        /* An output-only and an input-only device: one aggregate device for both directions,
++           when Core Audio makes one and it opens; else a unit for each device and a ring. */
++        if( inputParameters && outputParameters && streamCallback
++                && !HasChannelMap( inputParameters ) && !HasChannelMap( outputParameters )
++                && hostApi->deviceInfos[ inputParameters->device ]->maxOutputChannels == 0
++                && hostApi->deviceInfos[ outputParameters->device ]->maxInputChannels == 0 )
++        {
++            stream->aggregateDevice = CreateAggregateDevice( auhalHostApi->devIds[outputParameters->device],
++                                                             auhalHostApi->devIds[inputParameters->device] );
++            if( stream->aggregateDevice != kAudioObjectUnknown )
++            {
++                result = OpenAndSetupOneAudioUnit( stream,
++                                                   inputParameters,
++                                                   outputParameters,
++                                                   suggestedLatencyFramesPerBuffer,
++                                                   &inputFramesPerBuffer,
++                                                   &outputFramesPerBuffer,
++                                                   auhalHostApi,
++                                                   &(stream->inputUnit),
++                                                   &(stream->inputSRConverter),
++                                                   &(stream->inputDevice),
++                                                   sampleRate,
++                                                   stream,
++                                                   stream->aggregateDevice );
++                if( result == paNoError )
++                {
++                    stream->inputFramesPerBuffer = inputFramesPerBuffer;
++                    stream->outputFramesPerBuffer = outputFramesPerBuffer;
++                    stream->outputUnit = stream->inputUnit;
++                    stream->outputDevice = stream->inputDevice;
++                }
++                else
++                {
++                    removeFromXRunListenerList( stream );
++                    AudioHardwareDestroyAggregateDevice( stream->aggregateDevice );
++                    stream->aggregateDevice = kAudioObjectUnknown;
++                    stream->inputUnit = NULL;
++                    stream->inputSRConverter = NULL;
++                }
++            }
++        }
++    }
++    if( !stream->inputUnit && !stream->outputUnit )
++    {   /* full duplex, different devices OR simplex */
++        UInt32 outputFramesPerBuffer = (UInt32) stream->outputFramesPerBuffer;
++        UInt32 inputFramesPerBuffer  = (UInt32) stream->inputFramesPerBuffer;
+         result = OpenAndSetupOneAudioUnit( stream,
+                                            NULL,
+                                            outputParameters,
+@@ -1914,7 +2054,8 @@
+                                            NULL,
+                                            &(stream->outputDevice),
+                                            sampleRate,
+-                                           stream );
++                                           stream,
++                                           kAudioObjectUnknown );
+         if( result != paNoError )
+             goto error;
+         result = OpenAndSetupOneAudioUnit( stream,
+@@ -1928,7 +2069,8 @@
+                                            &(stream->inputSRConverter),
+                                            &(stream->inputDevice),
+                                            sampleRate,
+-                                           stream );
++                                           stream,
++                                           kAudioObjectUnknown );
+         if( result != paNoError )
+             goto error;
+         stream->inputFramesPerBuffer = inputFramesPerBuffer;
+@@ -2501,9 +2643,11 @@
+                     err = 0;
+                     UInt32 size = packets * bytesPerFrame;
+                     bzero( ((char *)data) + size, sizeof(data)-size );
+-                    /* The ring buffer can underflow normally when the stream is stopping.
+-                     * So only report an error if the stream is active. */
+-                    if( stream->state == ACTIVE )
++                    /* The ring buffer can underflow normally when the stream is stopping, and
++                     * before the first input arrives (one unit for both directions can render
++                     * output first). So only report an error if the stream is active and
++                     * input has come. */
++                    if( stream->state == ACTIVE && stream->inputRingReady )
+                     {
+                         stream->xrunFlags |= paInputUnderflow;
+                     }
+@@ -2791,6 +2935,11 @@
+             AudioComponentInstanceDispose( stream->inputUnit );
+             stream->inputUnit = NULL;
+         }
++        if( stream->aggregateDevice != kAudioObjectUnknown )
++        {
++            AudioHardwareDestroyAggregateDevice( stream->aggregateDevice );
++            stream->aggregateDevice = kAudioObjectUnknown;
++        }
+         if( stream->inputRingBuffer.buffer )
+             free( (void *) stream->inputRingBuffer.buffer );
+         stream->inputRingBuffer.buffer = NULL;

@@ -1,0 +1,217 @@
+diff --color -ruN 2/src/hostapi/coreaudio/pa_mac_core_internal.h 3/src/hostapi/coreaudio/pa_mac_core_internal.h
+--- 2/src/hostapi/coreaudio/pa_mac_core_internal.h	2026-10-10 11:17:50.000000000 +0300
++++ 3/src/hostapi/coreaudio/pa_mac_core_internal.h	2026-10-10 11:17:50.000000000 +0300
+@@ -158,6 +158,21 @@
+     AudioTimeStamp startTime;
+     /* FIXME: instead of volatile, these should be properly memory barriered */
+     volatile uint32_t xrunFlags; /*PaStreamCallbackFlags*/
++
++    /* Separate input and output devices: timing of the input ring buffer.
++       The input ioproc publishes the ADC time of each block it writes; the
++       output ioproc uses it for inputBufferAdcTime. */
++    volatile int inputRingReady;           /* the input ioproc wrote a block */
++    int inputRingTrimmed;                  /* output ioproc only */
++    volatile uint32_t inputStampSequence;  /* odd while the stamp changes */
++    volatile double inputStampAdcTime;     /* ADC time of the first frame of the last block */
++    volatile int64_t inputStampFrame;      /* input frame index of that frame */
++    int64_t inputFramesWritten;            /* input ioproc only */
++    int64_t inputFramesRead;               /* output ioproc only */
++    double converterInputRate;             /* device rate in front of inputSRConverter */
++    double converterLeadingFrames;
++    int64_t converterStartFrame;           /* -1 until the converter reads */
++    int64_t converterOutputFrames;
+     volatile enum {
+         STOPPED          = 0, /* playback is completely stopped,
+                                 and the user has called StopStream(). */
+diff --color -ruN 2/src/hostapi/coreaudio/pa_mac_core.c 3/src/hostapi/coreaudio/pa_mac_core.c
+--- 2/src/hostapi/coreaudio/pa_mac_core.c	2026-10-10 11:17:50.000000000 +0300
++++ 3/src/hostapi/coreaudio/pa_mac_core.c	2026-10-10 11:17:50.000000000 +0300
+@@ -73,6 +73,7 @@
+ #include <string.h> /* strlen(), memcmp() etc. */
+ 
+ #include "pa_mac_core_internal.h"
++#include "pa_memorybarrier.h"
+ #include "pa_mac_core.h"
+ #include "pa_mac_core_utilities.h"
+ #include "pa_mac_core_blocking.h"
+@@ -2152,6 +2153,73 @@
+ 
+ #define RING_BUFFER_EMPTY (1000)
+ 
++/* Called by the input ioproc after it wrote a block of inputFrames to the
++   ring buffer, captured at adcTime. */
++static void PublishInputStamp( PaMacCoreStream *stream, double adcTime, ring_buffer_size_t frames )
++{
++    stream->inputStampSequence++;
++    PaUtil_WriteMemoryBarrier();
++    stream->inputStampAdcTime = adcTime;
++    stream->inputStampFrame = stream->inputFramesWritten;
++    PaUtil_WriteMemoryBarrier();
++    stream->inputStampSequence++;
++    stream->inputFramesWritten += frames;
++    stream->inputRingReady = 1;
++}
++
++static int ReadInputStamp( PaMacCoreStream *stream, double *adcTime, int64_t *frame )
++{
++    const uint32_t before = stream->inputStampSequence;
++    PaUtil_ReadMemoryBarrier();
++    *adcTime = stream->inputStampAdcTime;
++    *frame = stream->inputStampFrame;
++    PaUtil_ReadMemoryBarrier();
++    return before != 0 && !( before & 1 ) && before == stream->inputStampSequence;
++}
++
++/* Called by the output ioproc when input comes from a separate device.
++   The ring buffer starts with an arbitrary fill that depends on when the two
++   devices started. Once input arrives, drop the excess so that the fill is
++   one host buffer more than this callback needs; this keeps the latency
++   low and the same on every start. Then correct inputBufferAdcTime, which
++   would otherwise ignore the time the input spends in the ring buffer. */
++static void SyncInputRing( PaMacCoreStream *stream, unsigned long outputFrames, PaStreamCallbackTimeInfo *timeInfo )
++{
++    double stampAdcTime;
++    int64_t stampFrame;
++
++    if( !stream->inputRingTrimmed && stream->inputRingReady )
++    {
++        const ring_buffer_size_t target =
++            MAX( stream->inputFramesPerBuffer, stream->outputFramesPerBuffer ) + outputFrames;
++        const ring_buffer_size_t available = PaUtil_GetRingBufferReadAvailable( &stream->inputRingBuffer );
++        if( available > target )
++        {
++            PaUtil_AdvanceRingBufferReadIndex( &stream->inputRingBuffer, available - target );
++            stream->inputFramesRead += available - target;
++        }
++        stream->inputRingTrimmed = 1;
++        stream->converterStartFrame = stream->inputFramesRead;
++    }
++
++    if( !stream->inputRingTrimmed || !ReadInputStamp( stream, &stampAdcTime, &stampFrame ) )
++        return;
++
++    if( stream->inputSRConverter )
++    {
++        /* The converter turns converterInputRate frames into sampleRate frames */
++        const double inputFrame = stream->converterStartFrame
++                                  + stream->converterOutputFrames * stream->converterInputRate / stream->sampleRate
++                                  - stream->converterLeadingFrames;
++        timeInfo->inputBufferAdcTime = stampAdcTime + ( inputFrame - stampFrame ) / stream->converterInputRate;
++        stream->converterOutputFrames += outputFrames;
++    }
++    else
++    {
++        timeInfo->inputBufferAdcTime = stampAdcTime + (double)( stream->inputFramesRead - stampFrame ) / stream->sampleRate;
++    }
++}
++
+ static OSStatus ringBufferIOProc(
+     AudioConverterRef              inAudioConverter,
+     UInt32*                        ioNumberDataPackets,
+@@ -2161,7 +2229,8 @@
+ {
+     VVDBUG(("ringBufferIOProc()\n"));
+ 
+-    PaUtilRingBuffer *rb = (PaUtilRingBuffer *) inUserData;
++    PaMacCoreStream *stream = (PaMacCoreStream *) inUserData;
++    PaUtilRingBuffer *rb = &stream->inputRingBuffer;
+ 
+     if( PaUtil_GetRingBufferReadAvailable( rb ) == 0 ) {
+         ioData->mBuffers[0].mData = NULL;
+@@ -2184,6 +2253,7 @@
+     assert(rbElementsRead > 0);
+     VVDBUG(("RingBuffer read elements %u of %u\n", rbElementsRead, rbElements));
+     PaUtil_AdvanceRingBufferReadIndex( rb, rbElementsRead );
++    stream->inputFramesRead += rbElementsRead;
+ 
+     UInt32 bytesRead = rbElementsRead * rb->elementSizeBytes;
+     ioData->mBuffers[0].mDataByteSize = bytesRead;
+@@ -2381,6 +2451,9 @@
+         if( stream->state == STOPPING || stream->state == CALLBACK_STOPPED )
+             xrunFlags = 0;
+ 
++        if( stream->inputUnit )
++            SyncInputRing( stream, ioData->mBuffers[0].mDataByteSize / bytesPerFrame, &timeInfo );
++
+         /* -- start processing -- */
+         PaUtil_BeginBufferProcessing( &(stream->bufferProcessor),
+                                       &timeInfo,
+@@ -2418,7 +2491,7 @@
+                 err = AudioConverterFillComplexBuffer(
+                         stream->inputSRConverter,
+                         ringBufferIOProc,
+-                        &stream->inputRingBuffer,
++                        stream,
+                         &packets,
+                         &bufferList,
+                         NULL);
+@@ -2471,6 +2544,7 @@
+                         PaUtil_EndBufferProcessing( &(stream->bufferProcessor),
+                                                     &callbackResult );
+                     PaUtil_AdvanceRingBufferReadIndex(&stream->inputRingBuffer, size1 );
++                    stream->inputFramesRead += size1;
+                 } else if( framesReadable < frames ) {
+ 
+                     long sizeBytes1 = size1 * bytesPerFrame;
+@@ -2497,6 +2571,7 @@
+                                                     &callbackResult );
+                     PaUtil_AdvanceRingBufferReadIndex( &stream->inputRingBuffer,
+                                                        framesReadable );
++                    stream->inputFramesRead += framesReadable;
+                     /* flag underflow */
+                     stream->xrunFlags |= paInputUnderflow;
+                 } else {
+@@ -2515,6 +2590,7 @@
+                         PaUtil_EndBufferProcessing( &(stream->bufferProcessor),
+                                                     &callbackResult );
+                     PaUtil_AdvanceRingBufferReadIndex(&stream->inputRingBuffer, framesReadable );
++                    stream->inputFramesRead += framesReadable;
+                 }
+             }
+         } else {
+@@ -2558,6 +2634,7 @@
+             ring_buffer_size_t framesWritten = PaUtil_WriteRingBuffer( &stream->inputRingBuffer,
+                                                                        stream->inputAudioBufferList.mBuffers[0].mData,
+                                                                        inNumberFrames );
++            PublishInputStamp( stream, timeInfo.inputBufferAdcTime, framesWritten );
+             if( framesWritten != inNumberFrames )
+             {
+                 stream->xrunFlags |= paInputOverflow ;
+@@ -2607,7 +2684,7 @@
+                 err = AudioConverterFillComplexBuffer(
+                         stream->inputSRConverter,
+                         ringBufferIOProc,
+-                        &stream->inputRingBuffer,
++                        stream,
+                         &packets,
+                         &bufferList,
+                         NULL);
+@@ -2756,6 +2833,28 @@
+         ERR_WRAP( AudioConverterReset( stream->inputSRConverter ) );
+ 
+     /* -- start -- */
++    stream->inputRingReady = 0;
++    stream->inputRingTrimmed = 0;
++    stream->inputStampSequence = 0;
++    stream->inputFramesRead = 0;
++    stream->inputFramesWritten = ( stream->inputRingBuffer.buffer && stream->outputUnit )
++                                 ? stream->inputRingBuffer.bufferSize / RING_BUFFER_ADVANCE_DENOMINATOR : 0;
++    stream->converterStartFrame = -1;
++    stream->converterOutputFrames = 0;
++    stream->converterInputRate = stream->sampleRate;
++    stream->converterLeadingFrames = 0;
++    if( stream->inputSRConverter )
++    {
++        AudioStreamBasicDescription inputFormat;
++        AudioConverterPrimeInfo prime;
++        UInt32 size = sizeof( inputFormat );
++        if( AudioConverterGetProperty( stream->inputSRConverter, kAudioConverterCurrentInputStreamDescription,
++                                       &size, &inputFormat ) == noErr )
++            stream->converterInputRate = inputFormat.mSampleRate;
++        size = sizeof( prime );
++        if( AudioConverterGetProperty( stream->inputSRConverter, kAudioConverterPrimeInfo, &size, &prime ) == noErr )
++            stream->converterLeadingFrames = prime.leadingFrames;
++    }
+     stream->state = ACTIVE;
+     if( stream->inputUnit ) {
+         ERR_WRAP( AudioOutputUnitStart(stream->inputUnit) );
