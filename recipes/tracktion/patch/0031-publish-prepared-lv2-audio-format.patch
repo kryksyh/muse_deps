@@ -1,0 +1,10 @@
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
+@@ -3715,6 +3715,7 @@
+         setStateInformationImpl (mb.getData(), (int) mb.getSize(), ConcurrentWithAudioCallback::no);
+         parameterValues.setSampleRate (sampleRate);
+         parameterValues.writeControlPortValues (getParameterWriterUrids());
++        setRateAndBufferSizeDetails (sampleRate, numSamples);
+ 
+         jassert (numSamples == instance->features.getMaxBlockSize());
+         activate();

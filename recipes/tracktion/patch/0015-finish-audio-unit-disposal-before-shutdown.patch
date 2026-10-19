@@ -1,0 +1,28 @@
+--- a/modules/tracktion_engine/utilities/tracktion_Engine.cpp
++++ b/modules/tracktion_engine/utilities/tracktion_Engine.cpp
+@@ -92,7 +92,14 @@
+     temporaryFileManager->cleanUp();
+     getRenderManager().cleanUp();
+ 
+-    waitForPluginDeletion (std::move (onReadyToDestroy));
++    waitForPluginDeletion ([onReadyToDestroy = std::move (onReadyToDestroy)]
++    {
++       #if JUCE_PLUGINHOST_AU
++        juce::AudioUnitPluginFormatHeadless::waitForPendingDisposals();
++       #endif
++        if (onReadyToDestroy)
++            onReadyToDestroy();
++    });
+ }
+ 
+ Engine::~Engine()
+@@ -117,6 +124,9 @@
+     // Any queued plugin instance deletions must complete before ARA is uninitialised
+     // and its modules are released - some of those instances may be ARA-bound
+     cleanUpDanglingPlugins();
++   #if JUCE_PLUGINHOST_AU
++    juce::AudioUnitPluginFormatHeadless::waitForPendingDisposals();
++   #endif
+     ARAFileReader::cleanUpOnShutdown();
+     pluginManager.reset();
+ 

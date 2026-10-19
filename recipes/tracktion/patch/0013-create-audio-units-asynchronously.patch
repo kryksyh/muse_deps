@@ -1,0 +1,59 @@
+--- a/modules/juce_audio_processors_headless/format_types/juce_AudioUnitPluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_AudioUnitPluginFormatImpl.h
+@@ -483,21 +483,15 @@
+ 
+ static void createAudioUnit (VersionedAudioComponent versionedComponent, AudioUnitCreationCallback callback)
+ {
+-    if (versionedComponent.isAUv3)
+-    {
+-        AudioComponentInstantiate (versionedComponent.audioComponent,
+-                                   kAudioComponentInstantiation_LoadOutOfProcess,
+-                                   ^(AudioComponentInstance audioUnit, OSStatus err)
++    const auto options = versionedComponent.isAUv3 ? kAudioComponentInstantiation_LoadOutOfProcess : 0;
++    AudioComponentInstantiate (versionedComponent.audioComponent, options,
++                               ^(AudioComponentInstance audioUnit, OSStatus err)
++                               {
++                                   MessageManager::callAsync ([callback, audioUnit, err]
+                                    {
+                                        callback (audioUnit, err);
+                                    });
+-
+-        return;
+-    }
+-
+-    AudioComponentInstance audioUnit;
+-    auto err = AudioComponentInstanceNew (versionedComponent.audioComponent, &audioUnit);
+-    callback (err != noErr ? nullptr : audioUnit, err);
++                               });
+ }
+ 
+ struct AudioComponentResult
+--- a/modules/juce_audio_processors_headless/format_types/juce_AudioUnitPluginFormatHeadless.mm
++++ b/modules/juce_audio_processors_headless/format_types/juce_AudioUnitPluginFormatHeadless.mm
+@@ -96,24 +96,9 @@
+     });
+ }
+ 
+-bool AudioUnitPluginFormatHeadless::requiresUnblockedMessageThreadDuringCreation (const PluginDescription& desc) const
++bool AudioUnitPluginFormatHeadless::requiresUnblockedMessageThreadDuringCreation (const PluginDescription&) const
+ {
+-    String pluginName, version, manufacturer;
+-    AudioComponentDescription componentDesc;
+-
+-    if (AudioUnitFormatHelpers::getComponentDescFromIdentifier (desc.fileOrIdentifier, componentDesc,
+-                                                                pluginName, version, manufacturer)
+-           || AudioUnitFormatHelpers::getComponentDescFromFile (desc.fileOrIdentifier, componentDesc,
+-                                                                pluginName, version, manufacturer))
+-    {
+-        if (AudioComponent auComp = AudioComponentFindNext (nullptr, &componentDesc))
+-        {
+-            if (AudioComponentGetDescription (auComp, &componentDesc) == noErr)
+-                return AudioUnitFormatHelpers::isPluginAUv3 (componentDesc);
+-        }
+-    }
+-
+-    return false;
++    return true;
+ }
+ 
+ StringArray AudioUnitPluginFormatHeadless::searchPathsForPlugins (const FileSearchPath&, bool /*recursive*/, bool allowPluginsWhichRequireAsynchronousInstantiation)

@@ -1,0 +1,39 @@
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
+@@ -3934,17 +3934,22 @@
+     {
+         PortMap portStateManager (instance->ports);
+ 
+-        // If a plugin supports threadSafeRestore, its restore method is thread-safe
+-        // and may be called concurrently with audio class functions.
++        const auto restore = [&]
++        {
++            parameterValues.writeControlPortValues (getParameterWriterUrids());
++            return state.restore (*instance, portStateManager);
++        };
++
++        // Control port updates cannot run with the audio callback.
+         bool restored = false;
+-        if (hasThreadSafeRestore || concurrent == ConcurrentWithAudioCallback::no)
+-        {
+-            restored = state.restore (*instance, portStateManager);
++        if (concurrent == ConcurrentWithAudioCallback::no)
++        {
++            restored = restore();
+         }
+         else
+         {
+             const ScopedLock lock (getCallbackLock());
+-            restored = state.restore (*instance, portStateManager);
++            restored = restore();
+         }
+ 
+         if (restored)
+@@ -4394,7 +4399,6 @@
+                                                        : nullptr;
+ 
+     int lastAppliedPreset = 0;
+-    bool hasThreadSafeRestore = plugin.hasExtensionData (world->newUri (LV2_STATE__threadSafeRestore));
+     bool active { false };
+ 
+     JUCE_LEAK_DETECTOR (LV2AudioPluginInstanceHeadless)

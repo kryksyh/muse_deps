@@ -1,0 +1,32 @@
+--- a/modules/juce_audio_processors_headless/utilities/juce_AudioPluginExtensions.h
++++ b/modules/juce_audio_processors_headless/utilities/juce_AudioPluginExtensions.h
+@@ -38,6 +38,7 @@
+ namespace Steinberg::Vst
+ {
+     class IComponent;
++    class IEditController;
+ } // namespace Steinberg::Vst
+ 
+ /** @endcond */
+@@ -88,6 +89,7 @@
+     {
+         virtual ~VST3Client() = default;
+         virtual Steinberg::Vst::IComponent* getIComponentPtr() const noexcept = 0;
++        virtual Steinberg::Vst::IEditController* getIEditControllerPtr() const noexcept = 0;
+         virtual MemoryBlock getPreset() const = 0;
+         virtual bool setPreset (const MemoryBlock&) = 0;
+     };
+--- a/modules/juce_audio_processors_headless/format_types/juce_VST3PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_VST3PluginFormatImpl.h
+@@ -2251,6 +2251,11 @@
+           AudioPluginExtensions::VST3Client* getVST3Client()       override { return this; }
+     const AudioPluginExtensions::VST3Client* getVST3Client() const override { return this; }
+ 
++    Steinberg::Vst::IEditController* getIEditControllerPtr() const noexcept override
++    {
++        return editController.get();
++    }
++
+     Steinberg::Vst::IComponent* getIComponentPtr() const noexcept override
+     {
+         return holder->component.get();

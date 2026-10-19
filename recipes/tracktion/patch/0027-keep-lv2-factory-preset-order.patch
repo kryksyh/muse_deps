@@ -1,0 +1,10 @@
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
+@@ -4844,6 +4844,7 @@
+         for (const auto* potentialPreset : potentialPresets)
+             presetUris.push_back (lilv_node_as_string (potentialPreset));
+ 
++        std::sort (presetUris.begin(), presetUris.end());
+         return presetUris;
+     }
+ 

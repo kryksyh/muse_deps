@@ -1,0 +1,51 @@
+--- a/modules/juce_audio_processors_headless/utilities/juce_AudioPluginExtensions.h
++++ b/modules/juce_audio_processors_headless/utilities/juce_AudioPluginExtensions.h
+@@ -107,6 +107,7 @@
+     /** Provides access to LV2 control ports and state. */
+     struct LV2Client
+     {
++        /** Bounds and defaults use the values declared by the plugin. */
+         struct ControlPortInfo
+         {
+             uint32_t index = 0;
+@@ -120,6 +121,7 @@
+ 
+         virtual ~LV2Client() = default;
+         virtual std::vector<ControlPortInfo> getControlPorts() const = 0;
++        virtual double getInstanceSampleRate() const = 0;
+         virtual std::optional<float> getControlPortValue (uint32_t index) const = 0;
+         virtual bool setControlPortValue (uint32_t index, float value) = 0;
+         virtual bool restoreState (const MemoryBlock&) = 0;
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
+@@ -1601,7 +1601,7 @@
+             const auto label = wrapper.getLabel();
+ 
+             if (lilv_node_is_float (value) || lilv_node_is_int (value))
+-                scalePoints.insert ({ lilv_node_as_string (label), lilv_node_as_float (value) });
++                scalePoints.insert ({ String::fromUTF8 (lilv_node_as_string (label)), lilv_node_as_float (value) });
+         }
+ 
+         return scalePoints;
+@@ -3309,7 +3309,7 @@
+         const auto value = worldIn.get (scalePoint, worldIn.newUri (LILV_NS_RDF "value").get(), nullptr);
+ 
+         if (label != nullptr && value != nullptr)
+-            parsedScalePoints.insert ({ lilv_node_as_string (label.get()), lilv_node_as_float (value.get()) });
++            parsedScalePoints.insert ({ String::fromUTF8 (lilv_node_as_string (label.get())), lilv_node_as_float (value.get()) });
+         else
+             jassertfalse; // A ScalePoint must have both a rdfs:label and a rdf:value
+     }
+@@ -3537,6 +3537,12 @@
+         return result;
+     }
+ 
++    double getInstanceSampleRate() const override
++    {
++        const ScopedLock lock (getCallbackLock());
++        return instance->sampleRate;
++    }
++
+     std::optional<float> getControlPortValue (uint32_t index) const override
+     {
+         const ScopedLock lock (getCallbackLock());

@@ -1,0 +1,34 @@
+--- a/modules/tracktion_engine/playback/devices/tracktion_WaveInputDevice.h
++++ b/modules/tracktion_engine/playback/devices/tracktion_WaveInputDevice.h
+@@ -38,6 +38,11 @@
+     TimeDuration getRecordAdjustment() const                    { return TimeDuration::fromSeconds (recordAdjustMs / 1000.0); }
+     void setRecordAdjustmentMs (double ms);
+     double getRecordAdjustmentMs() const                        { return recordAdjustMs; }
++
++    /** Overrides the combined manual and device latency adjustment for new recordings. */
++    void setRecordAdjustmentOverride (std::optional<TimeDuration> value) { recordAdjustmentOverride = value; }
++    std::optional<TimeDuration> getRecordAdjustmentOverride() const     { return recordAdjustmentOverride; }
++
+     /** @deprecated Use getChannels().getNumChannels() == 2 instead. */
+     [[deprecated ("Use getChannels().getNumChannels() == 2 instead")]]
+     bool isStereoPair() const;
+@@ -111,6 +116,7 @@
+     int bitDepth = 0, mergeMode = 0;
+     float recordTriggerDb = 0;
+     double recordAdjustMs = 0;
++    std::optional<TimeDuration> recordAdjustmentOverride;
+     std::atomic<bool> meterGateClosed { false };
+     std::unique_ptr<RetrospectiveRecordBuffer> retrospectiveBuffer;
+ 
+--- a/modules/tracktion_engine/playback/devices/tracktion_WaveInputDevice.cpp
++++ b/modules/tracktion_engine/playback/devices/tracktion_WaveInputDevice.cpp
+@@ -1757,6 +1757,9 @@
+ 
+ TimeDuration WaveInputDevice::getAdjustmentSeconds()
+ {
++    if (recordAdjustmentOverride)
++        return *recordAdjustmentOverride;
++
+     auto& dm = engine.getDeviceManager();
+     const double autoAdjustMs = isTrackDevice() ? 0.0 : dm.getRecordAdjustmentMs();
+ 

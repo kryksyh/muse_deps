@@ -1,0 +1,208 @@
+--- a/modules/juce_audio_processors_headless/utilities/juce_AudioPluginExtensions.h
++++ b/modules/juce_audio_processors_headless/utilities/juce_AudioPluginExtensions.h
+@@ -104,6 +104,27 @@
+         virtual bool restoreState (const MemoryBlock&) = 0;
+     };
+ 
++    /** Provides access to LV2 control ports and state. */
++    struct LV2Client
++    {
++        struct ControlPortInfo
++        {
++            uint32_t index = 0;
++            String symbol, name, group, units;
++            float minimum = 0.0f, maximum = 1.0f, defaultValue = 0.0f;
++            bool isInput = false, hasMinimum = false, hasMaximum = false;
++            bool isToggle = false, isInteger = false, isEnumeration = false;
++            bool isSampleRate = false, isTrigger = false, isLogarithmic = false;
++            std::vector<std::pair<float, String>> scalePoints;
++        };
++
++        virtual ~LV2Client() = default;
++        virtual std::vector<ControlPortInfo> getControlPorts() const = 0;
++        virtual std::optional<float> getControlPortValue (uint32_t index) const = 0;
++        virtual bool setControlPortValue (uint32_t index, float value) = 0;
++        virtual bool restoreState (const MemoryBlock&) = 0;
++    };
++
+     /** Can be used to retrieve information about a VST that is wrapped by an AudioProcessor. */
+     struct VSTClient
+     {
+--- a/modules/juce_audio_processors_headless/processors/juce_AudioPluginInstance.h
++++ b/modules/juce_audio_processors_headless/processors/juce_AudioPluginInstance.h
+@@ -99,6 +99,11 @@
+     /** Returns VST3-specific extensions, or nullptr if extensions are unavailable. */
+     virtual const AudioPluginExtensions::VST3Client* getVST3Client() const { return nullptr; }
+ 
++    /** Returns LV2-specific extensions, or nullptr if extensions are unavailable. */
++    virtual       AudioPluginExtensions::LV2Client* getLV2Client()       { return nullptr; }
++    /** Returns LV2-specific extensions, or nullptr if extensions are unavailable. */
++    virtual const AudioPluginExtensions::LV2Client* getLV2Client() const { return nullptr; }
++
+     using HostedParameter = HostedAudioProcessorParameter;
+ 
+     /** Adds a parameter to this instance.
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
+@@ -3462,7 +3462,8 @@
+ #endif
+ 
+ //==============================================================================
+-class LV2AudioPluginInstanceHeadless : public AudioPluginInstance
++class LV2AudioPluginInstanceHeadless : public AudioPluginInstance,
++                                        public AudioPluginExtensions::LV2Client
+ {
+ public:
+     LV2AudioPluginInstanceHeadless (std::shared_ptr<World> worldIn,
+@@ -3484,6 +3485,93 @@
+     {
+     }
+ 
++    AudioPluginExtensions::LV2Client* getLV2Client() override { return this; }
++    const AudioPluginExtensions::LV2Client* getLV2Client() const override { return this; }
++
++    std::vector<ControlPortInfo> getControlPorts() const override
++    {
++        std::vector<ControlPortInfo> result;
++
++        for (const auto& port : instance->ports.getControlPorts())
++        {
++            const auto source = plugin.getPortByIndex (port.header.index);
++            ControlPortInfo info;
++            info.index = port.header.index;
++            info.name = port.header.name;
++            info.symbol = port.header.symbol;
++            info.minimum = port.info.min;
++            info.maximum = port.info.max;
++            info.defaultValue = port.info.defaultValue;
++            info.isInput = port.header.direction == Port::Direction::input;
++            info.isToggle = info.isInput && port.info.isToggle;
++            info.isInteger = info.isInput && port.info.isInteger;
++            info.isEnumeration = info.isInput && port.info.isEnum;
++            info.isSampleRate = info.isInput && port.info.isSampleRate;
++            info.isTrigger = info.isInput && source.hasProperty (world->newUri (LV2_PORT_PROPS__trigger));
++            info.isLogarithmic = info.isInput && source.hasProperty (world->newUri (LV2_PORT_PROPS__logarithmic));
++            info.hasMinimum = source.get (world->newUri (LV2_CORE__minimum).get()) != nullptr;
++            info.hasMaximum = source.get (world->newUri (LV2_CORE__maximum).get()) != nullptr;
++
++            if (const auto group = source.get (world->newUri (LV2_PORT_GROUPS__group).get()))
++            {
++                info.group = lilvNodeToString (world->get (group.get(), world->newUri (LILV_NS_RDFS "label").get(), nullptr).get());
++
++                if (info.group.isEmpty())
++                    info.group = lilvNodeToString (world->get (group.get(), world->newUri (LV2_CORE__name).get(), nullptr).get());
++
++                if (info.group.isEmpty())
++                    info.group = lilvNodeToUriString (group.get());
++            }
++
++            if (const auto unit = source.get (world->newUri (LV2_UNITS__unit).get()))
++            {
++                const OwningNode symbol { lilv_world_get_symbol (world->get(), unit.get()) };
++                info.units = lilvNodeToString (symbol.get());
++            }
++
++            for (const auto& point : port.info.scalePoints)
++                info.scalePoints.emplace_back (point.value, point.label);
++
++            result.push_back (std::move (info));
++        }
++
++        return result;
++    }
++
++    std::optional<float> getControlPortValue (uint32_t index) const override
++    {
++        const ScopedLock lock (getCallbackLock());
++
++        if (const auto* parameter = parameterValues.getParamByPortIndex (index))
++            return parameter->getDenormalisedValue();
++
++        if (const auto* port = findControlPortWithIndex (index))
++            return port->currentValue;
++
++        return std::nullopt;
++    }
++
++    bool setControlPortValue (uint32_t index, float value) override
++    {
++        const ScopedLock lock (getCallbackLock());
++        auto* port = findControlPortWithIndex (index);
++
++        if (port == nullptr || port->header.direction != Port::Direction::input)
++            return false;
++
++        if (auto* parameter = parameterValues.getParamByPortIndex (index))
++            parameter->setDenormalisedValue (value);
++        else
++            port->currentValue = value;
++
++        return true;
++    }
++
++    bool restoreState (const MemoryBlock& state) override
++    {
++        return setStateInformationImpl (state.getData(), (int) state.getSize(), ConcurrentWithAudioCallback::yes);
++    }
++
+     void fillInPluginDescription (PluginDescription& d) const override { d = description; }
+ 
+     const String getName() const override { return description.name; }
+@@ -3602,7 +3690,11 @@
+         JUCE_ASSERT_MESSAGE_THREAD;
+ 
+         if (isPositiveAndBelow (program, presetUris.size()))
+-            return loadStateWithUri (presetUris[(size_t) program]).getLabel();
++        {
++            const auto& uri = presetUris[(size_t) program];
++            const auto label = loadStateWithUri (uri).getLabel();
++            return label.isNotEmpty() ? label : uri.fromLastOccurrenceOf ("#", false, false);
++        }
+ 
+         return {};
+     }
+@@ -3725,19 +3817,29 @@
+         applyStateWithAppropriateLocking (std::move (stateToApply), ConcurrentWithAudioCallback::no);
+     }
+ 
+-    void setStateInformationImpl (const void* data, int size, ConcurrentWithAudioCallback concurrent)
++    bool setStateInformationImpl (const void* data, int size, ConcurrentWithAudioCallback concurrent)
+     {
+         JUCE_ASSERT_MESSAGE_THREAD;
+ 
+-        if (data == nullptr || size == 0)
+-            return;
++        if (data == nullptr || size <= 0)
++            return false;
+ 
+         auto begin = static_cast<const char*> (data);
+         std::vector<char> copy (begin, begin + size);
+         copy.push_back (0);
+         auto mapFeature = instance->symap->getMapFeature();
+-        applyStateWithAppropriateLocking (PluginState { lilv_state_new_from_string (world->get(), &mapFeature, copy.data()) },
+-                                          concurrent);
++        PluginState state { lilv_state_new_from_string (world->get(), &mapFeature, copy.data()) };
++
++        if (state.get() == nullptr)
++            return false;
++
++        const auto* uri = lilv_state_get_plugin_uri (state.get());
++
++        if (uri == nullptr || String::fromUTF8 (lilv_node_as_uri (uri)) != description.fileOrIdentifier)
++            return false;
++
++        applyStateWithAppropriateLocking (std::move (state), concurrent);
++        return true;
+     }
+ 
+     void activate()
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2Common.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2Common.h
+@@ -63,6 +63,7 @@
+     #include "lv2/dynmanifest/dynmanifest.h"
+     #include "lv2/instance-access/instance-access.h"
+     #include "lv2/log/log.h"
++    #include "lv2/port-props/port-props.h"
+     #include "lv2/midi/midi.h"
+     #include "lv2/options/options.h"
+     #include "lv2/parameters/parameters.h"

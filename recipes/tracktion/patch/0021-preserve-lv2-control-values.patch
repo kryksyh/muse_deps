@@ -1,0 +1,343 @@
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
+@@ -295,6 +295,7 @@
+     X (LV2_CORE__enumeration)
+     X (LV2_CORE__integer)
+     X (LV2_CORE__toggled)
++    X (LV2_CORE__sampleRate)
+     X (LV2_RESIZE_PORT__minimumSize)
+     X (LV2_UI__floatProtocol)
+     X (LV2_WORKER__interface)
+@@ -558,9 +559,10 @@
+         const OwningNode minOwner { min };
+         const OwningNode maxOwner { max };
+ 
+-        return { getFloatValue (def, 0.0f),
+-                 getFloatValue (min, 0.0f),
+-                 getFloatValue (max, 1.0f) };
++        const auto minimum = getFloatValue (min, 0.0f);
++        const auto maximum = getFloatValue (max, 1.0f);
++        const auto fallback = min != nullptr ? minimum : max != nullptr ? maximum : 0.0f;
++        return { getFloatValue (def, fallback), minimum, maximum };
+     }
+ 
+     bool isValid() const noexcept { return port != nullptr; }
+@@ -1575,7 +1577,8 @@
+                    float maxIn,
+                    bool isToggleIn,
+                    bool isIntegerIn,
+-                   bool isEnumIn)
++                   bool isEnumIn,
++                   bool isSampleRateIn = false)
+         : scalePoints (std::move (scalePointsIn)),
+           identifier (std::move (identifierIn)),
+           defaultValue (defaultValueIn),
+@@ -1583,7 +1586,8 @@
+           max (maxIn),
+           isToggle (isToggleIn),
+           isInteger (isIntegerIn),
+-          isEnum (isEnumIn)
++          isEnum (isEnumIn),
++          isSampleRate (isSampleRateIn)
+     {}
+ 
+     static SafeSortedSet<StoredScalePoint> getScalePoints (const Port& port)
+@@ -1614,7 +1618,8 @@
+                  range.max,
+                  port.hasProperty (uris.mLV2_CORE__toggled),
+                  port.hasProperty (uris.mLV2_CORE__integer),
+-                 port.hasProperty (uris.mLV2_CORE__enumeration) };
++                 port.hasProperty (uris.mLV2_CORE__enumeration),
++                 port.hasProperty (uris.mLV2_CORE__sampleRate) };
+     }
+ 
+     SafeSortedSet<StoredScalePoint> scalePoints;
+@@ -1623,7 +1628,7 @@
+     String identifier;
+ 
+     float defaultValue = 0.0f, min = 0.0f, max = 1.0f;
+-    bool isToggle = false, isInteger = false, isEnum = false;
++    bool isToggle = false, isInteger = false, isEnum = false, isSampleRate = false;
+ 
+     JUCE_LEAK_DETECTOR (ParameterInfo)
+ };
+@@ -2006,11 +2011,12 @@
+                           const Plugin& plugin,
+                           Ports portsIn,
+                           int32_t initialBufferSize,
+-                          double sampleRate)
++                          double sampleRateIn)
+         : symap (std::move (symapIn)),
+           ports (std::move (portsIn)),
++          sampleRate (sampleRateIn),
+           features (*this, *this, initialBufferSize, lv2_host::Ports::sequenceSize, &urids),
+-          instance (plugin, sampleRate, features.getFeatureArray()),
++          instance (plugin, sampleRateIn, features.getFeatureArray()),
+           workerInterface (instance.getExtensionData<LV2_Worker_Interface> (world.newUri (LV2_WORKER__interface)))
+     {
+         if (instance == nullptr)
+@@ -2040,6 +2046,7 @@
+     std::unique_ptr<SymbolMap> symap;
+     const UsefulUrids urids { *symap };
+     Ports ports;
++    const double sampleRate;
+     FeaturesData features;
+     Instance instance;
+     Messages<MessageHeader, RealtimeReadTrait> uiToProcessor;
+@@ -2083,8 +2090,11 @@
+ {
+ public:
+     explicit PortMap (Ports& ports)
+-    {
+-        for (auto& port : ports.getControlPorts())
++        : PortMap (ports.getControlPorts()) {}
++
++    explicit PortMap (SimpleSpan<ControlPort> ports)
++    {
++        for (auto& port : ports)
+             symbolToControlPortMap.emplace (port.header.symbol, &port);
+     }
+ 
+@@ -2434,34 +2444,35 @@
+ public:
+     LV2Parameter (const String& nameIn,
+                   const ParameterInfo& infoIn,
+-                  ParameterValuesAndFlags& floatCache)
++                  ParameterValuesAndFlags& floatCache,
++                  double sampleRate)
+         : cache (floatCache),
+           info (infoIn),
+-          range (info.min, info.max),
++          scaleFactor (info.isSampleRate ? (float) sampleRate : 1.0f),
+           name (nameIn),
+-          normalisedDefault (range.convertTo0to1 (infoIn.defaultValue))
++          normalisedDefault (NormalisableRange<float> { info.min, info.max }.convertTo0to1 (infoIn.defaultValue))
+     {}
+ 
+     float getValue() const noexcept override
+     {
+-        return range.convertTo0to1 (getDenormalisedValue());
++        return getRange().convertTo0to1 (getDenormalisedValue());
+     }
+ 
+     void setValue (float f) override
+     {
+-        cache.set ((size_t) getParameterIndex(), range.convertFrom0to1 (f), Update::yes);
++        cache.set ((size_t) getParameterIndex(), getRange().convertFrom0to1 (f), Update::yes);
+     }
+ 
+     void setDenormalisedValue (float denormalised)
+     {
+         cache.set ((size_t) getParameterIndex(), denormalised, Update::yes);
+-        sendValueChangedMessageToListeners (range.convertTo0to1 (denormalised));
++        sendValueChangedMessageToListeners (getRange().convertTo0to1 (denormalised));
+     }
+ 
+     void setDenormalisedValueWithoutTriggeringUpdate (float denormalised)
+     {
+         cache.set ((size_t) getParameterIndex(), denormalised, Update::no);
+-        sendValueChangedMessageToListeners (range.convertTo0to1 (denormalised));
++        sendValueChangedMessageToListeners (getRange().convertTo0to1 (denormalised));
+     }
+ 
+     float getDenormalisedValue() const noexcept
+@@ -2469,18 +2480,30 @@
+         return cache.get ((size_t) getParameterIndex());
+     }
+ 
++    void setSampleRate (double sampleRate)
++    {
++        const auto factor = info.isSampleRate ? (float) sampleRate : 1.0f;
++
++        if (factor == scaleFactor)
++            return;
++
++        const auto value = getDenormalisedValue() * factor / scaleFactor;
++        scaleFactor = factor;
++        setDenormalisedValueWithoutTriggeringUpdate (value);
++    }
++
+     float getDefaultValue() const override { return normalisedDefault; }
+-    float getDenormalisedDefaultValue() const { return info.defaultValue; }
++    float getDenormalisedDefaultValue() const { return info.defaultValue * scaleFactor; }
+ 
+     float getValueForText (const String& text) const override
+     {
+         if (! info.isEnum)
+-            return range.convertTo0to1 (text.getFloatValue());
++            return getRange().convertTo0to1 (text.getFloatValue());
+ 
+         const auto it = std::find_if (info.scalePoints.begin(),
+                                       info.scalePoints.end(),
+                                       [&] (const StoredScalePoint& stored) { return stored.label == text; });
+-        return it != info.scalePoints.end() ? range.convertTo0to1 (it->value) : normalisedDefault;
++        return it != info.scalePoints.end() ? getRange().convertTo0to1 (it->value * scaleFactor) : normalisedDefault;
+     }
+ 
+     int getNumSteps() const override
+@@ -2492,7 +2515,7 @@
+             return static_cast<int> (info.scalePoints.size());
+ 
+         if (info.isInteger)
+-            return static_cast<int> (range.getRange().getLength()) + 1;
++            return static_cast<int> (getRange().getRange().getLength()) + 1;
+ 
+         return AudioProcessorParameter::getNumSteps();
+     }
+@@ -2510,7 +2533,7 @@
+ 
+     String getText (float normalisedValue, int) const override
+     {
+-        const auto denormalised = range.convertFrom0to1 (normalisedValue);
++        const auto denormalised = getRange().convertFrom0to1 (normalisedValue);
+ 
+         if (info.isEnum && ! info.scalePoints.empty())
+         {
+@@ -2518,7 +2541,7 @@
+             // In this case, we find the closest label by searching the midpoints of the scale
+             // point values.
+             const auto index = std::distance (midPoints.begin(),
+-                                              std::lower_bound (midPoints.begin(), midPoints.end(), denormalised));
++                                              std::lower_bound (midPoints.begin(), midPoints.end(), denormalised / scaleFactor));
+             jassert (isPositiveAndBelow (index, info.scalePoints.size()));
+             return info.scalePoints[(size_t) index].label;
+         }
+@@ -2543,6 +2566,11 @@
+     }
+ 
+ private:
++    NormalisableRange<float> getRange() const noexcept
++    {
++        return { info.min * scaleFactor, info.max * scaleFactor };
++    }
++
+     String getFallbackParameterString (float denormalised) const
+     {
+         if (info.isToggle)
+@@ -2573,7 +2601,7 @@
+     ParameterValuesAndFlags& cache;
+     const ParameterInfo info;
+     const std::vector<float> midPoints = findScalePointMidPoints (info.scalePoints);
+-    const NormalisableRange<float> range;
++    float scaleFactor;
+     const String name;
+     const float normalisedDefault;
+ 
+@@ -2951,8 +2979,8 @@
+ 
+ struct BypassParameter final : public LV2Parameter
+ {
+-    BypassParameter (const ParameterInfo& parameterInfo, ParameterValuesAndFlags& cacheIn)
+-        : LV2Parameter ("Bypass", parameterInfo, cacheIn) {}
++    BypassParameter (const ParameterInfo& parameterInfo, ParameterValuesAndFlags& cacheIn, double sampleRate)
++        : LV2Parameter ("Bypass", parameterInfo, cacheIn, sampleRate) {}
+ 
+     float getValue() const noexcept override
+     {
+@@ -2997,7 +3025,8 @@
+ 
+ static std::unique_ptr<LV2Parameter> makeParameter (const uint32_t* enabledPortIndex,
+                                                     const ParameterData& data,
+-                                                    ParameterValuesAndFlags& cache)
++                                                    ParameterValuesAndFlags& cache,
++                                                    double sampleRate)
+ {
+     // The bypass parameter is a bit special, in that JUCE expects the parameter to be a bypass
+     // (where 0 is active, 1 is inactive), but the LV2 version is called "enabled" and has
+@@ -3007,9 +3036,9 @@
+     if (enabledPortIndex != nullptr)
+         if (auto* index = data.writer.getPortIndex())
+             if (*index == *enabledPortIndex)
+-                return std::make_unique<BypassParameter> (data.info, cache);
+-
+-    return std::make_unique<LV2Parameter> (data.name, data.info, cache);
++                return std::make_unique<BypassParameter> (data.info, cache, sampleRate);
++
++    return std::make_unique<LV2Parameter> (data.name, data.info, cache, sampleRate);
+ }
+ 
+ class ControlPortAccelerationStructure
+@@ -3060,7 +3089,8 @@
+                          World& world,
+                          LV2_URID_Map mapFeature,
+                          const std::vector<ParameterData>& data,
+-                         ControlPort* enabledPort)
++                         ControlPort* enabledPort,
++                         double sampleRate)
+         : uiForge (mapFeature),
+           cache (data.size())
+     {
+@@ -3078,7 +3108,7 @@
+ 
+         for (const auto& item : data)
+         {
+-            auto param = makeParameter (enabledPortIndex, item, cache);
++            auto param = makeParameter (enabledPortIndex, item, cache, sampleRate);
+ 
+             if (auto* urid = item.writer.getUrid())
+                 urids.emplace (*urid, param.get());
+@@ -3115,6 +3145,19 @@
+ 
+         setToDefault (urids);
+         setToDefault (portIndices);
++    }
++
++    void setSampleRate (double sampleRate)
++    {
++        for (const auto& pair : portIndices)
++            pair.second->setSampleRate (sampleRate);
++    }
++
++    void writeControlPortValues (const ParameterWriterUrids helperUrids) const
++    {
++        for (size_t index = 0; index < writers.size(); ++index)
++            if (writers[index].getPortIndex() != nullptr)
++                writers[index].writeToProcessor (helperUrids, nullptr, cache.get (index));
+     }
+ 
+     void postChangedParametersToProcessor (const ParameterWriterUrids helperUrids,
+@@ -3473,6 +3516,8 @@
+ 
+         // prepareToPlay is *guaranteed* not to be called concurrently with processBlock
+         setStateInformationImpl (mb.getData(), (int) mb.getSize(), ConcurrentWithAudioCallback::no);
++        parameterValues.setSampleRate (sampleRate);
++        parameterValues.writeControlPortValues (getParameterWriterUrids());
+ 
+         jassert (numSamples == instance->features.getMaxBlockSize());
+         activate();
+@@ -3574,8 +3619,16 @@
+     {
+         JUCE_ASSERT_MESSAGE_THREAD;
+ 
++        const ScopedLock lock (getCallbackLock());
++        const auto ports = instance->ports.getControlPorts();
++        std::vector<ControlPort> controls (ports.begin(), ports.end());
++
++        for (auto& port : controls)
++            if (const auto* param = parameterValues.getParamByPortIndex (port.header.index))
++                port.currentValue = param->getDenormalisedValue();
++
+         // TODO where should the state URI come from?
+-        PortMap portStateManager (instance->ports);
++        PortMap portStateManager (makeSimpleSpan (controls));
+         const auto stateUri = String::fromUTF8 (instance->instance.getUri()) + "/savedState";
+         auto mapFeature = instance->symap->getMapFeature();
+         auto unmapFeature = instance->symap->getUnmapFeature();
+@@ -3668,6 +3721,7 @@
+           presetUris (std::move (knownPresetUris)),
+           instance (std::move (in))
+     {
++        parameterValues.writeControlPortValues (getParameterWriterUrids());
+         applyStateWithAppropriateLocking (std::move (stateToApply), ConcurrentWithAudioCallback::no);
+     }
+ 
+@@ -4184,7 +4238,8 @@
+                                                                 { latencyPort, freeWheelingPort },
+                                                                 instance->ports.getControlPorts(),
+                                                                 controlPort != nullptr ? controlPort->header.index : 0),
+-                                          enabledPort };
++                                          enabledPort,
++                                          instance->sampleRate };
+     LV2Parameter* bypassParam = enabledPort != nullptr ? parameterValues.getParamByPortIndex (enabledPort->header.index)
+                                                        : nullptr;
+ 

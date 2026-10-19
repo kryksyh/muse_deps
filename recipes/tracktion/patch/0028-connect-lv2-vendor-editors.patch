@@ -1,0 +1,321 @@
+--- a/modules/juce_audio_processors_headless/utilities/juce_AudioPluginExtensions.h
++++ b/modules/juce_audio_processors_headless/utilities/juce_AudioPluginExtensions.h
+@@ -119,6 +119,38 @@
+             std::vector<std::pair<float, String>> scalePoints;
+         };
+ 
++        struct UiDescription
++        {
++            String uri, bundlePath, binaryPath;
++            StringArray types, requiredFeatures;
++        };
++
++        struct UiFeature
++        {
++            String uri;
++            void* data = nullptr;
++        };
++
++        struct UiCallbacks
++        {
++            std::function<void()> instanceChanging, instanceChanged;
++        };
++
++        /** Use the message thread. Keep the processor alive until you close the connection. */
++        struct UiConnection
++        {
++            using ExtensionData = const void* (*) (const char*);
++            using PortEvent = std::function<void (uint32_t, uint32_t, uint32_t, const void*)>;
++            virtual ~UiConnection() = default;
++            virtual void* getInstanceHandle() const = 0;
++            virtual ExtensionData getExtensionDataFunction() const = 0;
++            virtual std::vector<UiFeature> getFeatures() const = 0;
++            virtual uint32_t getPortIndex (const String& symbol) const = 0;
++            virtual bool writePort (uint32_t port, uint32_t size, uint32_t protocol, const void* data) = 0;
++            virtual void dispatchEvents (const PortEvent&) = 0;
++            virtual void disconnect() = 0;
++        };
++
+         virtual ~LV2Client() = default;
+         virtual std::vector<ControlPortInfo> getControlPorts() const = 0;
+         virtual double getInstanceSampleRate() const = 0;
+@@ -126,6 +158,8 @@
+         virtual bool setControlPortValue (uint32_t index, float value) = 0;
+         virtual bool restoreState (const MemoryBlock&) = 0;
+         virtual bool loadFactoryPreset (int index) = 0;
++        virtual std::vector<UiDescription> getUis() const = 0;
++        virtual std::shared_ptr<UiConnection> createUiConnection (UiCallbacks) = 0;
+     };
+ 
+     /** Can be used to retrieve information about a VST that is wrapped by an AudioProcessor. */
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
+@@ -3543,6 +3543,45 @@
+         return result;
+     }
+ 
++    std::vector<UiDescription> getUis() const override
++    {
++        JUCE_ASSERT_MESSAGE_THREAD;
++        std::vector<UiDescription> result;
++        Uis uis { plugin.get() };
++
++        for (const auto* ui : uis)
++        {
++            const auto uri = lilv_ui_get_uri (ui);
++            lilv_world_load_resource (world->get(), uri);
++            UiDescription description;
++            description.uri = lilvNodeToUriString (uri);
++            description.bundlePath = bundlePathFromUri (lilv_node_as_uri (lilv_ui_get_bundle_uri (ui))).getFullPathName();
++            description.binaryPath = bundlePathFromUri (lilv_node_as_uri (lilv_ui_get_binary_uri (ui))).getFullPathName();
++
++            for (const auto* type : world->findNodes (uri, world->newUri (LILV_NS_RDF "type").get(), nullptr))
++                description.types.add (lilvNodeToUriString (type));
++
++            for (const auto* feature : world->findNodes (uri, world->newUri (LV2_CORE__requiredFeature).get(), nullptr))
++                description.requiredFeatures.add (lilvNodeToUriString (feature));
++
++            result.push_back (std::move (description));
++        }
++
++        return result;
++    }
++
++    std::shared_ptr<UiConnection> createUiConnection (UiCallbacks callbacks) override
++    {
++        JUCE_ASSERT_MESSAGE_THREAD;
++        if (! externalUi.expired())
++            return nullptr;
++
++        auto connection = std::make_shared<ExternalUiConnection> (*this, std::move (callbacks));
++        externalUi = connection;
++        externalUiToken.store (++nextExternalUiToken);
++        return connection;
++    }
++
+     double getInstanceSampleRate() const override
+     {
+         const ScopedLock lock (getCallbackLock());
+@@ -3639,17 +3678,28 @@
+         // and recreate it after creating the new plugin instance.
+         // Ideally this should all happen in the same Component.
+ 
++        const auto connection = externalUi.lock();
++        if (connection)
++            connection->beforeInstanceChange();
++
+         deactivate();
+ 
+         MemoryBlock mb;
+         getStateInformation (mb);
+ 
++        auto previous = std::move (instance);
+         instance = std::make_unique<InstanceWithSupports> (*world,
+-                                                           std::move (instance->symap),
++                                                           std::move (previous->symap),
+                                                            plugin,
+-                                                           std::move (instance->ports),
++                                                           std::move (previous->ports),
+                                                            numSamples,
+                                                            sampleRate);
++
++        previous->uiToProcessor.readAllAndClear ([this] (MessageHeader header, uint32_t size, const void* data)
++        {
++            instance->uiToProcessor.pushMessage (header, size, data);
++        });
++        previous.reset();
+ 
+         // prepareToPlay is *guaranteed* not to be called concurrently with processBlock
+         setStateInformationImpl (mb.getData(), (int) mb.getSize(), ConcurrentWithAudioCallback::no);
+@@ -3658,6 +3708,9 @@
+ 
+         jassert (numSamples == instance->features.getMaxBlockSize());
+         activate();
++
++        if (connection)
++            connection->afterInstanceChange();
+     }
+ 
+     void releaseResources() override { deactivate(); }
+@@ -3839,6 +3892,157 @@
+     }
+ 
+ private:
++    struct ExternalUiMessage
++    {
++        uint64_t token;
++        MessageHeader header;
++    };
++
++    class ExternalUiConnection final : public UiConnection,
++                                       public std::enable_shared_from_this<ExternalUiConnection>
++    {
++    public:
++        ExternalUiConnection (LV2AudioPluginInstanceHeadless& p, UiCallbacks c)
++            : owner (&p), callbacks (std::move (c)) {}
++
++        ~ExternalUiConnection() override { disconnect(); }
++
++        void* getInstanceHandle() const override
++        {
++            return owner != nullptr ? owner->instance->instance.getHandle() : nullptr;
++        }
++
++        ExtensionData getExtensionDataFunction() const override
++        {
++            return owner != nullptr ? owner->instance->instance.getExtensionDataCallback() : nullptr;
++        }
++
++        std::vector<UiFeature> getFeatures() const override
++        {
++            std::vector<UiFeature> result;
++            if (owner != nullptr)
++                for (auto feature = owner->instance->features.getFeatureArray(); *feature != nullptr; ++feature)
++                    result.push_back ({ String::fromUTF8 ((*feature)->URI), (*feature)->data });
++
++            return result;
++        }
++
++        uint32_t getPortIndex (const String& symbol) const override
++        {
++            uint32_t result = LV2UI_INVALID_PORT_INDEX;
++            if (owner != nullptr)
++                owner->instance->ports.forEachPort ([&] (const PortHeader& port)
++                {
++                    if (port.symbol == symbol)
++                        result = port.index;
++                });
++
++            return result;
++        }
++
++        bool writePort (uint32_t port, uint32_t size, uint32_t protocol, const void* data) override
++        {
++            JUCE_ASSERT_MESSAGE_THREAD;
++            if (owner == nullptr || data == nullptr)
++                return false;
++
++            const ScopedLock lock (owner->getCallbackLock());
++            const auto& urids = owner->instance->urids;
++            if (protocol == 0 || protocol == owner->instance->symap->map (LV2_UI__floatProtocol))
++                return size == sizeof (float) && owner->setControlPortValue (port, readUnaligned<float> (data));
++
++            const auto* atomPort = port < owner->atomPorts.size() ? owner->atomPorts[port] : nullptr;
++            if (atomPort == nullptr || atomPort->header.direction != Port::Direction::input
++                || (protocol != urids.mLV2_ATOM__eventTransfer && protocol != owner->instance->symap->map (LV2_ATOM__atomTransfer))
++                || convertToAtomPtr (data, size) == nullptr)
++                return false;
++
++            owner->instance->uiToProcessor.pushMessage ({ port, protocol }, size, data);
++            return true;
++        }
++
++        void dispatchEvents (const PortEvent& callback) override
++        {
++            JUCE_ASSERT_MESSAGE_THREAD;
++            const auto keepAlive = shared_from_this();
++            if (owner == nullptr)
++                return;
++
++            std::vector<std::pair<uint32_t, float>> values;
++            {
++                const ScopedLock lock (owner->getCallbackLock());
++                for (const auto& port : owner->instance->ports.getControlPorts())
++                    if (const auto value = owner->getControlPortValue (port.header.index))
++                        values.emplace_back (port.header.index, *value);
++            }
++
++            for (const auto& pair : values)
++            {
++                if (owner == nullptr)
++                    return;
++
++                const auto found = lastValues.find (pair.first);
++                if (found == lastValues.end() || found->second != pair.second)
++                {
++                    lastValues[pair.first] = pair.second;
++                    callback (pair.first, sizeof (float), 0, &pair.second);
++                }
++            }
++
++            if (owner != nullptr)
++            {
++                const auto token = owner->externalUiToken.load();
++                owner->externalUiMessages.readAllAndClear ([&] (const ExternalUiMessage& message, uint32_t size, const void* data)
++                {
++                    if (owner != nullptr && token == message.token)
++                        callback (message.header.portIndex, size, message.header.protocol, data);
++                });
++            }
++        }
++
++        void disconnect() override
++        {
++            JUCE_ASSERT_MESSAGE_THREAD;
++            if (owner != nullptr)
++            {
++                owner->externalUiToken.store (0);
++                owner->externalUi.reset();
++                owner = nullptr;
++                callbacks = {};
++            }
++        }
++
++        void beforeInstanceChange()
++        {
++            if (owner != nullptr)
++                owner->externalUiToken.store (0);
++
++            if (callbacks.instanceChanging)
++            {
++                const auto callback = callbacks.instanceChanging;
++                callback();
++            }
++        }
++
++        void afterInstanceChange()
++        {
++            if (owner != nullptr)
++                owner->externalUiToken.store (++owner->nextExternalUiToken);
++
++            lastValues.clear();
++            if (callbacks.instanceChanged)
++            {
++                const auto callback = callbacks.instanceChanged;
++                callback();
++            }
++        }
++
++    private:
++        LV2AudioPluginInstanceHeadless* owner;
++        UiCallbacks callbacks;
++        std::map<uint32_t, float> lastValues;
++    };
++
+     enum class ConcurrentWithAudioCallback { no, yes };
+ 
+     virtual void sendOutgoingPortMessageToUi (UiMessageHeader, uint32_t, const void*) {}
+@@ -4175,6 +4379,11 @@
+ 
+         for (const auto* event : lv2_shared::SequenceIterator { lv2_shared::SequenceWithSize { sequence } })
+         {
++            if (const auto token = externalUiToken.load())
++                externalUiMessages.pushMessage ({ token, { port.header.index, instance->urids.mLV2_ATOM__eventTransfer } },
++                                                (uint32_t) (event->body.size + sizeof (LV2_Atom)),
++                                                &event->body);
++
+             sendOutgoingPortMessageToUi ({ nullptr, { port.header.index, instance->urids.mLV2_ATOM__eventTransfer } },
+                                          (uint32_t) (event->body.size + sizeof (LV2_Atom)),
+                                          &event->body);
+@@ -4397,6 +4606,11 @@
+                                           instance->sampleRate };
+     LV2Parameter* bypassParam = enabledPort != nullptr ? parameterValues.getParamByPortIndex (enabledPort->header.index)
+                                                        : nullptr;
++
++    std::weak_ptr<ExternalUiConnection> externalUi;
++    std::atomic<uint64_t> externalUiToken { 0 };
++    uint64_t nextExternalUiToken = 0;
++    Messages<ExternalUiMessage, RealtimeWriteTrait> externalUiMessages;
+ 
+     int lastAppliedPreset = 0;
+     bool active { false };

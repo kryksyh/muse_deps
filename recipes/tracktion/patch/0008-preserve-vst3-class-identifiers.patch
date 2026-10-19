@@ -1,0 +1,119 @@
+--- a/modules/juce_audio_processors_headless/processors/juce_PluginDescription.h
++++ b/modules/juce_audio_processors_headless/processors/juce_PluginDescription.h
+@@ -126,6 +126,9 @@
+     */
+     int uniqueId = 0;
+ 
++    /** The complete format identifier, when available. */
++    String uniqueIdString;
++
+     /** True if the plug-in identifies itself as a synthesiser. */
+     bool isInstrument = false;
+ 
+--- a/modules/juce_audio_processors_headless/processors/juce_PluginDescription.cpp
++++ b/modules/juce_audio_processors_headless/processors/juce_PluginDescription.cpp
+@@ -37,6 +37,9 @@
+ 
+ bool PluginDescription::isDuplicateOf (const PluginDescription& other) const noexcept
+ {
++    if (uniqueIdString.isNotEmpty() && other.uniqueIdString.isNotEmpty())
++        return fileOrIdentifier == other.fileOrIdentifier && uniqueIdString == other.uniqueIdString;
++
+     const auto tie = [] (const PluginDescription& d)
+     {
+         return std::tie (d.fileOrIdentifier, d.deprecatedUid, d.uniqueId);
+@@ -82,6 +85,7 @@
+     e->setAttribute ("version", version);
+     e->setAttribute ("file", fileOrIdentifier);
+     e->setAttribute ("uniqueId", String::toHexString (uniqueId));
++    e->setAttribute ("uniqueIdString", uniqueIdString);
+     e->setAttribute ("isInstrument", isInstrument);
+     e->setAttribute ("fileTime", String::toHexString (lastFileModTime.toMilliseconds()));
+     e->setAttribute ("infoUpdateTime", String::toHexString (lastInfoUpdateTime.toMilliseconds()));
+@@ -106,6 +110,7 @@
+         manufacturerName    = xml.getStringAttribute ("manufacturer");
+         version             = xml.getStringAttribute ("version");
+         fileOrIdentifier    = xml.getStringAttribute ("file");
++        uniqueIdString      = xml.getStringAttribute ("uniqueIdString");
+         isInstrument        = xml.getBoolAttribute ("isInstrument", false);
+         lastFileModTime     = Time (xml.getStringAttribute ("fileTime").getHexValue64());
+         lastInfoUpdateTime  = Time (xml.getStringAttribute ("infoUpdateTime").getHexValue64());
+--- a/modules/juce_audio_processors_headless/format_types/juce_VST3PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_VST3PluginFormatImpl.h
+@@ -184,14 +184,23 @@
+     return (int) value;
+ }
+ 
++static String getFullClassID (const TUID& uid)
++{
++    char text[33] {};
++    FUID (uid).toString (text);
++    return String (text);
++}
++
+ template <typename ObjectType>
+ static void fillDescriptionWith (PluginDescription& description, ObjectType& object)
+ {
+-    description.version  = toString (object.version).trim();
+-    description.category = toString (object.subCategories).trim();
+-
+-    if (description.manufacturerName.trim().isEmpty())
+-        description.manufacturerName = toString (object.vendor).trim();
++    description.descriptiveName = toString (object.name);
++    description.version         = toString (object.version);
++    description.category        = toString (object.subCategories);
++
++    const auto vendor = toString (object.vendor);
++    if (vendor.isNotEmpty())
++        description.manufacturerName = vendor;
+ }
+ 
+ static std::vector<PluginDescription> createPluginDescriptions (const File& pluginFile, const ModuleInfo& info)
+@@ -221,7 +230,7 @@
+         description.fileOrIdentifier    = pluginFile.getFullPathName();
+         description.lastFileModTime     = pluginFile.getLastModificationTime();
+         description.lastInfoUpdateTime  = Time::getCurrentTime();
+-        description.manufacturerName    = CharPointer_UTF8 (info.factoryInfo.vendor.c_str());
++        description.manufacturerName    = CharPointer_UTF8 ((c.vendor.empty() ? info.factoryInfo.vendor : c.vendor).c_str());
+         description.name                = CharPointer_UTF8 (c.name.c_str());
+         description.descriptiveName     = CharPointer_UTF8 (c.name.c_str());
+         description.pluginFormatName    = "VST3";
+@@ -237,6 +246,7 @@
+ 
+         description.deprecatedUid       = getHashForRange (uid->data());
+         description.uniqueId            = getHashForRange (getNormalisedTUID (uid->data()));
++        description.uniqueIdString      = getFullClassID (uid->data());
+ 
+         StringArray categories;
+ 
+@@ -265,13 +275,14 @@
+     description.lastInfoUpdateTime  = Time::getCurrentTime();
+     description.manufacturerName    = company;
+     description.name                = name;
+-    description.descriptiveName     = name;
++    description.descriptiveName     = toString (info.name);
+     description.pluginFormatName    = "VST3";
+     description.numInputChannels    = numInputs;
+     description.numOutputChannels   = numOutputs;
+ 
+     description.deprecatedUid       = getHashForRange (info.cid);
+     description.uniqueId            = getHashForRange (getNormalisedTUID (info.cid));
++    description.uniqueIdString      = getFullClassID (info.cid);
+ 
+     if (infoW != nullptr)      fillDescriptionWith (description, *infoW);
+     else if (info2 != nullptr) fillDescriptionWith (description, *info2);
+@@ -1367,6 +1378,14 @@
+ 
+             if (std::strcmp (info.category, kVstAudioEffectClass) != 0)
+                 continue;
++
++            if (desc.uniqueIdString.isNotEmpty())
++            {
++                if (getFullClassID (info.cid) == desc.uniqueIdString)
++                    return i;
++
++                continue;
++            }
+ 
+             const auto uniqueId = getHashForRange (getNormalisedTUID (info.cid));
+             const auto deprecatedUid = getHashForRange (info.cid);

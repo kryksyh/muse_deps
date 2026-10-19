@@ -1,0 +1,12 @@
+--- a/modules/tracktion_engine/playback/tracktion_DeviceManager.cpp
++++ b/modules/tracktion_engine/playback/tracktion_DeviceManager.cpp
+@@ -631,6 +631,9 @@
+ 
+ void DeviceManager::dispatchPendingUpdates()
+ {
++    while (finishedInitialising && ! onlyRescanMidiOnHardwareChange)
++        applyNewMidiDeviceList();
++
+     handleUpdateNowIfNeeded();
+     prepareToStartCaller->handleUpdateNowIfNeeded();
+ }

@@ -1,0 +1,44 @@
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
+@@ -1271,7 +1271,11 @@
+ 
+     int32_t getMaxBlockSize() const noexcept { return maxBlockSize; }
+ 
+-    void setNonRealtime (bool newValue) { realtime = ! newValue; }
++    void setNonRealtime (bool newValue)
++    {
++        realtime = ! newValue;
++        workScheduler.setNonRealtime (newValue);
++    }
+ 
+     const LV2_Feature* const* getFeatureArray() const noexcept { return features.pointers.data(); }
+ 
+@@ -3710,6 +3714,7 @@
+             instance->uiToProcessor.pushMessage (header, size, data);
+         });
+         previous.reset();
++        instance->features.setNonRealtime (isNonRealtime());
+ 
+         // prepareToPlay is *guaranteed* not to be called concurrently with processBlock
+         setStateInformationImpl (mb.getData(), (int) mb.getSize(), ConcurrentWithAudioCallback::no);
+@@ -3719,6 +3724,20 @@
+ 
+         jassert (numSamples == instance->features.getMaxBlockSize());
+         activate();
++
++        if (latencyPort != nullptr)
++        {
++            instance->features.setNonRealtime (true);
++            AudioBuffer<float> audio (std::max (getTotalNumInputChannels(), getTotalNumOutputChannels()), numSamples);
++            audio.clear();
++            MidiBuffer midi;
++            processBlockImpl (audio, midi);
++            const auto latency = getLatencySamples();
++            deactivate();
++            activate();
++            setLatencySamples (latency);
++        }
++        instance->features.setNonRealtime (isNonRealtime());
+ 
+         if (connection)
+             connection->afterInstanceChange();

@@ -1,0 +1,88 @@
+--- a/modules/tracktion_engine/plugins/external/tracktion_ExternalPlugin.h
++++ b/modules/tracktion_engine/plugins/external/tracktion_ExternalPlugin.h
+@@ -28,6 +28,9 @@
+ {
+ public:
+     ExternalPlugin (PluginCreationInfo);
++    /** Uses the source processor. The owner must keep its Edit alive.
++        Only one wrapper can process this instance at a time. */
++    ExternalPlugin (PluginCreationInfo, ExternalPlugin* source, std::shared_ptr<void> owner);
+     ~ExternalPlugin() override;
+ 
+     juce::String getIdentifierString() override { return createIdentifierString (desc); }
+--- a/modules/tracktion_engine/plugins/external/tracktion_ExternalPlugin.cpp
++++ b/modules/tracktion_engine/plugins/external/tracktion_ExternalPlugin.cpp
+@@ -153,18 +153,33 @@
+         return loadedInstance;
+     }
+ 
++    static std::unique_ptr<LoadedInstance> createShared (ExternalPlugin& ep, ExternalPlugin& source,
++                                                        std::shared_ptr<void> owner)
++    {
++        assert (source.getAudioPluginInstance());
++        std::unique_ptr<LoadedInstance> result (new LoadedInstance());
++        result->sharedOwner = std::move (owner);
++        result->sharedSource = &source;
++        result->processorChangedManager = std::make_unique<ProcessorChangedManager> (ep, result->getInstance());
++        return result;
++    }
++
+     juce::AudioPluginInstance& getInstance()
+     {
+-        return *pluginInstance;
++        return pluginInstance ? *pluginInstance : *sharedSource->getAudioPluginInstance();
+     }
+ 
+     std::unique_ptr<juce::AudioPluginInstance> releaseInstance()
+     {
+         processorChangedManager.reset();
++        sharedSource = nullptr;
++        sharedOwner.reset();
+         return std::move (pluginInstance);
+     }
+ 
+ private:
++    std::shared_ptr<void> sharedOwner;
++    ExternalPlugin::Ptr sharedSource;
+     std::unique_ptr<juce::AudioPluginInstance> pluginInstance;
+     std::unique_ptr<ProcessorChangedManager> processorChangedManager;
+ 
+@@ -658,7 +673,11 @@
+ };
+ 
+ //==============================================================================
+-ExternalPlugin::ExternalPlugin (PluginCreationInfo info)  : Plugin (info)
++ExternalPlugin::ExternalPlugin (PluginCreationInfo info) : ExternalPlugin (info, nullptr, {})
++{
++}
++
++ExternalPlugin::ExternalPlugin (PluginCreationInfo info, ExternalPlugin* source, std::shared_ptr<void> owner) : Plugin (info)
+ {
+     CRASH_TRACER
+ 
+@@ -681,6 +700,15 @@
+     desc.uniqueIdString = state.getProperty ("uniqueIdString").toString();
+     desc.manufacturerName = state[IDs::manufacturer];
+     identiferString = createIdentifierString (desc);
++
++    if (source != nullptr && source->getAudioPluginInstance() != nullptr)
++    {
++        desc = source->desc;
++        loadedInstance = LoadedInstance::createShared (*this, *source, std::move (owner));
++        hasLoadedInstance = true;
++        supportsMPE = source->supportsMPE;
++        buildParameterList();
++    }
+ 
+     initialiseFully();
+ }
+@@ -1248,7 +1276,8 @@
+         CRASH_TRACER_PLUGIN (getDebugName());
+ 
+         const juce::ScopedLock sl (processMutex);
+-        pi->setPlayHead (nullptr); // must be done first!
++        if (pi->getPlayHead() == playhead.get())
++            pi->setPlayHead (nullptr);
+ 
+         if (playhead != nullptr)
+             playhead->setCurrentContext (nullptr);

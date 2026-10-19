@@ -1,0 +1,26 @@
+--- a/modules/tracktion_engine/playback/devices/tracktion_InputDevice.h
++++ b/modules/tracktion_engine/playback/devices/tracktion_InputDevice.h
+@@ -127,6 +127,9 @@
+         If the transport is currently recording, this will start a punch-in recording.
+     */
+     void setRecordingEnabled (EditItemID, bool);
++
++    /** Applies pending recording target and arm changes. */
++    void dispatchPendingRecordingUpdates();
+ 
+     /** Should return true if this input is currently actively recording into a track
+         and it wants the existing track contents to be muted.
+--- a/modules/tracktion_engine/playback/devices/tracktion_InputDevice.cpp
++++ b/modules/tracktion_engine/playback/devices/tracktion_InputDevice.cpp
+@@ -178,6 +178,11 @@
+     for (auto dest : destinations)
+         if (dest->targetID == targetID)
+             dest->recordEnabled = b;
++}
++
++void InputDeviceInstance::dispatchPendingRecordingUpdates()
++{
++    recordStatusUpdater.handleUpdateNowIfNeeded();
+ }
+ 
+ bool InputDeviceInstance::isLivePlayEnabled (const Track& t) const

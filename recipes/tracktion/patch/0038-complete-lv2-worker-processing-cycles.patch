@@ -1,0 +1,23 @@
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
+@@ -2083,6 +2083,12 @@
+             features.deregisterHandle (instance.getHandle());
+     }
+ 
++    void endRun()
++    {
++        if (workerInterface.valid && workerInterface.extension.end_run != nullptr)
++            workerInterface.extension.end_run (instance.getHandle());
++    }
++
+     std::unique_ptr<SymbolMap> symap;
+     const UsefulUrids urids { *symap };
+     Ports ports;
+@@ -4219,6 +4225,7 @@
+ 
+         instance->instance.run (static_cast<uint32_t> (audio.getNumSamples()));
+         instance->features.processResponses();
++        instance->endRun();
+ 
+         processPortsAfterRun (midi);
+     }

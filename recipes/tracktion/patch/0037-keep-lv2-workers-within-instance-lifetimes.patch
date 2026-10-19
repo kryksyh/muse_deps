@@ -1,0 +1,283 @@
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
+@@ -888,7 +888,7 @@
+ // Must be trivial!
+ struct WorkResponder
+ {
+-    static WorkResponder getDefault() { return { nullptr, nullptr }; }
++    static WorkResponder getDefault() { return { nullptr, nullptr, 0 }; }
+ 
+     LV2_Worker_Status processResponse (uint32_t size, const void* data) const
+     {
+@@ -899,6 +899,7 @@
+ 
+     LV2_Handle handle;
+     const LV2_Worker_Interface* worker;
++    uint64_t instanceId;
+ };
+ 
+ struct WorkerResponseListener
+@@ -932,29 +933,20 @@
+ // Must be trivial!
+ struct WorkSubmitter
+ {
+-    static WorkSubmitter getDefault() { return { nullptr, nullptr, nullptr, nullptr }; }
++    static WorkSubmitter getDefault() { return { nullptr, nullptr, nullptr, 0 }; }
+ 
+     LV2_Worker_Status doWork (Realtime realtime, uint32_t size, const void* data) const
+     {
+-        // The Worker spec says that the host "MUST NOT make concurrent calls to [work] from
+-        // several threads".
+-        // Taking the work mutex here ensures that only one piece of work is done at a time.
+-        // If we didn't take the work mutex, there would be a danger of work happening
+-        // simultaneously on the worker thread and the render thread when switching between
+-        // realtime/offline modes (in realtime mode, work happens on the worker thread; in
+-        // offline mode, work happens immediately on the render/audio thread).
+-        const ScopedLock lock (*workMutex);
+-
+-        RespondHandle respondHandle { WorkResponder { handle, worker }, *listener, realtime };
++        RespondHandle respondHandle { WorkResponder { handle, worker, instanceId }, *listener, realtime };
+         return worker->work (handle, RespondHandle::respond, &respondHandle, size, data);
+     }
+ 
+-    bool isValid() const { return handle != nullptr && worker != nullptr && listener != nullptr && workMutex != nullptr; }
++    bool isValid() const { return handle != nullptr && worker != nullptr && listener != nullptr && instanceId != 0; }
+ 
+     LV2_Handle handle;
+     const LV2_Worker_Interface* worker;
+     WorkerResponseListener* listener;
+-    CriticalSection* workMutex;
++    uint64_t instanceId;
+ };
+ 
+ template <typename Trivial>
+@@ -1054,38 +1046,66 @@
+     JUCE_LEAK_DETECTOR (WorkQueue)
+ };
+ 
+-/*
+-    Keeps track of active plugin instances, so that we can avoid sending work
+-    messages to dead plugins.
+-*/
+ class HandleRegistry
+ {
+ public:
+-    void insert (LV2_Handle handle)
+-    {
++    struct Entry
++    {
++        std::atomic<bool> active { true };
++        CriticalSection workMutex;
++        WorkQueue<WorkResponder> outgoing { 8192 };
++        std::vector<char> message = std::vector<char> (8192);
++    };
++
++    uint64_t insert()
++    {
++        auto entry = std::make_shared<Entry>();
+         const SpinLock::ScopedLockType lock (mutex);
+-        handles.insert (handle);
+-    }
+-
+-    void erase (LV2_Handle handle)
++        const auto id = ++nextId;
++        handles.emplace (id, std::move (entry));
++        return id;
++    }
++
++    void erase (uint64_t id)
++    {
++        std::shared_ptr<Entry> entry;
++
++        {
++            const SpinLock::ScopedLockType lock (mutex);
++            const auto it = handles.find (id);
++
++            if (it == handles.end())
++                return;
++
++            entry = std::move (it->second);
++            handles.erase (it);
++        }
++
++        entry->active = false;
++        const ScopedLock lock (entry->workMutex);
++    }
++
++    std::shared_ptr<Entry> find (uint64_t id)
+     {
+         const SpinLock::ScopedLockType lock (mutex);
+-        handles.erase (handle);
++        const auto it = handles.find (id);
++        return it != handles.end() ? it->second : nullptr;
+     }
+ 
+     template <typename Fn>
+-    LV2_Worker_Status ifContains (LV2_Handle handle, Fn&& callback)
++    LV2_Worker_Status ifContains (uint64_t id, Fn&& callback)
+     {
+         const SpinLock::ScopedLockType lock (mutex);
+ 
+-        if (handles.find (handle) != handles.cend())
++        if (handles.find (id) != handles.cend())
+             return callback();
+ 
+         return LV2_WORKER_ERR_UNKNOWN;
+     }
+ 
+ private:
+-    std::set<LV2_Handle> handles;
++    std::map<uint64_t, std::shared_ptr<Entry>> handles;
++    uint64_t nextId = 0;
+     SpinLock mutex;
+ 
+     JUCE_LEAK_DETECTOR (HandleRegistry)
+@@ -1112,7 +1132,7 @@
+                                 uint32_t size,
+                                 const void* data)
+     {
+-        return registry.ifContains (submitter.handle, [&]
++        return registry.ifContains (submitter.instanceId, [&]
+         {
+             return incoming.push (submitter, size, data);
+         });
+@@ -1122,34 +1142,51 @@
+                                          uint32_t size,
+                                          const void* data) override
+     {
+-        return registry.ifContains (responder.handle, [&]
+-        {
+-            return outgoing.push (responder, size, data);
+-        });
+-    }
+-
+-    void processResponses()
+-    {
++        const auto entry = registry.find (responder.instanceId);
++        return entry != nullptr ? entry->outgoing.push (responder, size, data)
++                                : LV2_WORKER_ERR_UNKNOWN;
++    }
++
++    LV2_Worker_Status doWork (WorkSubmitter submitter, Realtime realtime,
++                              uint32_t size, const void* data)
++    {
++        const auto entry = registry.find (submitter.instanceId);
++
++        if (entry == nullptr)
++            return LV2_WORKER_ERR_UNKNOWN;
++
++        // Keep work serial in real-time and offline modes, and wait for it before cleanup.
++        const ScopedLock lock (entry->workMutex);
++        return entry->active ? submitter.doWork (realtime, size, data)
++                             : LV2_WORKER_ERR_UNKNOWN;
++    }
++
++    void processResponses (uint64_t id)
++    {
++        const auto entry = registry.find (id);
++
++        if (entry == nullptr)
++            return;
++
+         for (;;)
+         {
+-            auto workerResponder = outgoing.pop (message);
+-
+-            if (! message.empty() && workerResponder.isValid())
+-                workerResponder.processResponse (static_cast<uint32_t> (message.size()), message.data());
+-            else
++            const auto responder = entry->outgoing.pop (entry->message);
++
++            if (! responder.isValid())
+                 break;
+-        }
+-    }
+-
+-    void registerHandle   (LV2_Handle handle) { registry.insert (handle); }
+-    void deregisterHandle (LV2_Handle handle) { registry.erase  (handle); }
++
++            responder.processResponse (static_cast<uint32_t> (entry->message.size()), entry->message.data());
++        }
++    }
++
++    uint64_t registerHandle() { return registry.insert(); }
++    void deregisterHandle (uint64_t id) { registry.erase (id); }
+ 
+ private:
+     static constexpr auto queueSize = 8192;
+     std::atomic<bool> shouldExit { false };
+     WorkQueue<WorkSubmitter> incoming { queueSize };
+-    WorkQueue<WorkResponder> outgoing { queueSize };
+-    std::vector<char> message = std::vector<char> (queueSize);
++    HandleRegistry registry;
+     std::thread thread { [this]
+     {
+         std::vector<char> buffer (queueSize);
+@@ -1158,13 +1195,12 @@
+         {
+             const auto submitter = incoming.pop (buffer);
+ 
+-            if (! buffer.empty() && submitter.isValid())
+-                submitter.doWork (Realtime::yes, (uint32_t) buffer.size(), buffer.data());
++            if (submitter.isValid())
++                doWork (submitter, Realtime::yes, (uint32_t) buffer.size(), buffer.data());
+             else
+                 std::this_thread::sleep_for (std::chrono::milliseconds (1));
+         }
+     } };
+-    HandleRegistry registry;
+ 
+     JUCE_LEAK_DETECTOR (SharedThreadedWorker)
+ };
+@@ -1182,14 +1218,14 @@
+     explicit WorkScheduler (HandleHolder& handleHolderIn)
+         : handleHolder (handleHolderIn) {}
+ 
+-    void processResponses() { workerThread->processResponses(); }
++    void processResponses() { workerThread->processResponses (instanceId); }
+ 
+     LV2_Worker_Schedule& getWorkerSchedule() { return schedule; }
+ 
+     void setNonRealtime (bool nonRealtime) { realtime = ! nonRealtime; }
+ 
+-    void registerHandle   (LV2_Handle handle) { workerThread->registerHandle   (handle); }
+-    void deregisterHandle (LV2_Handle handle) { workerThread->deregisterHandle (handle); }
++    void registerHandle (LV2_Handle) { instanceId = workerThread->registerHandle(); }
++    void deregisterHandle (LV2_Handle) { workerThread->deregisterHandle (std::exchange (instanceId, 0)); }
+ 
+ private:
+     LV2_Worker_Status scheduleWork (uint32_t size, const void* data)
+@@ -1197,14 +1233,14 @@
+         WorkSubmitter submitter { handleHolder.getHandle(),
+                                   handleHolder.getWorkerInterface(),
+                                   workerThread,
+-                                  &workMutex };
++                                  instanceId };
+ 
+         // If we're in realtime mode, the work should go onto a background thread,
+         // and we'll process it later.
+         // If we're offline, we can just do the work immediately, without worrying about
+         // drop-outs
+         return realtime ? workerThread->schedule (submitter, size, data)
+-                        : submitter.doWork (Realtime::no, size, data);
++                        : workerThread->doWork (submitter, Realtime::no, size, data);
+     }
+ 
+     static LV2_Worker_Status scheduleWork (LV2_Worker_Schedule_Handle handle,
+@@ -1217,7 +1253,7 @@
+     SharedResourcePointer<SharedThreadedWorker> workerThread;
+     HandleHolder& handleHolder;
+     LV2_Worker_Schedule schedule { this, scheduleWork };
+-    CriticalSection workMutex;
++    uint64_t instanceId = 0;
+     bool realtime = true;
+ 
+     JUCE_LEAK_DETECTOR (WorkScheduler)
+@@ -3696,6 +3732,7 @@
+         if (connection)
+             connection->beforeInstanceChange();
+ 
++        instance->features.deregisterHandle (instance->instance.getHandle());
+         deactivate();
+ 
+         MemoryBlock mb;

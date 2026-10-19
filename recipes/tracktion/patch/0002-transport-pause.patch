@@ -1,0 +1,115 @@
+--- a/modules/tracktion_engine/playback/tracktion_TransportControl.h
++++ b/modules/tracktion_engine/playback/tracktion_TransportControl.h
+@@ -98,6 +98,10 @@
+                bool clearDevices,
+                bool canSendMMCStop = true);
+ 
++    /** Pauses the playhead and keeps the recording context open. */
++    void setPaused (bool);
++    bool isPaused() const noexcept { return paused.load (std::memory_order_acquire); }
++
+     /** Stops playback only if recording is currently in progress.
+         @see isRecording
+     */
+@@ -416,6 +420,7 @@
+     int loopUpdateCounter = 10;
+     bool isStopInProgress = false;
+     bool recordingIsStoppingFlag = false;
++    std::atomic<bool> paused { false };
+ 
+     std::unique_ptr<ScreenSaverDefeater> screenSaverDefeater;
+ 
+--- a/modules/tracktion_engine/playback/tracktion_TransportControl.cpp
++++ b/modules/tracktion_engine/playback/tracktion_TransportControl.cpp
+@@ -566,14 +566,16 @@
+ 
+     void play()
+     {
+-        if (auto ph = getNodePlayHead())
+-            ph->play();
++        if (! transport.isPaused())
++            if (auto ph = getNodePlayHead())
++                ph->play();
+     }
+ 
+     void play (TimeRange timeRange, bool looped)
+     {
+-        if (auto ph = getNodePlayHead())
+-            ph->play (tracktion::toSamples (timeRange, getSampleRate()), looped);
++        if (! transport.isPaused())
++            if (auto ph = getNodePlayHead())
++                ph->play (tracktion::toSamples (timeRange, getSampleRate()), looped);
+     }
+ 
+     void setRollInToLoop (TimePosition prerollStartTime)
+@@ -878,6 +880,9 @@
+ //==============================================================================
+ void TransportControl::play (bool justSendMMCIfEnabled)
+ {
++    if (isPaused())
++        setPaused (false);
++
+     transportState->play (justSendMMCIfEnabled);
+ }
+ 
+@@ -908,6 +913,30 @@
+     transportState->stop (discardRecordings,
+                           clearDevices,
+                           canSendMMCStop);
++}
++
++void TransportControl::setPaused (bool shouldPause)
++{
++    TRACKTION_ASSERT_MESSAGE_THREAD
++
++    if (shouldPause == isPaused() || ! isPlaying())
++        return;
++
++    const juce::ScopedLock lock (engine.getDeviceManager().deviceManager.getAudioCallbackLock());
++    paused.store (shouldPause, std::memory_order_release);
++
++    if (shouldPause)
++    {
++        const auto currentPosition = playHeadWrapper->getPosition();
++        playHeadWrapper->stop();
++        transportState->updatePositionFromPlayhead (currentPosition);
++    }
++    else
++    {
++        playHeadWrapper->play();
++    }
++
++    sendChangeMessage();
+ }
+ 
+ void TransportControl::stopIfRecording()
+@@ -1059,6 +1088,9 @@
+ 
+     if (isDelayedChangePending)
+         editHasChanged();
++
++    if (isPaused())
++        return;
+ 
+     if (isPlaying() && playHeadWrapper->getPosition() >= Edit::getMaximumEditEnd())
+     {
+@@ -1656,6 +1688,8 @@
+ {
+     CRASH_TRACER
+ 
++    paused.store (false, std::memory_order_release);
++
+     const juce::ScopedValueSetter<bool> svs (isStopInProgress, true);
+     screenSaverDefeater.reset();
+     sectionPlayer.reset();
+--- a/modules/tracktion_engine/playback/tracktion_EditPlaybackContext.cpp
++++ b/modules/tracktion_engine/playback/tracktion_EditPlaybackContext.cpp
+@@ -305,7 +305,7 @@
+     void nextBlockStarted()
+     {
+         // Dispatch pending play
+-        if (playPending.exchange (false, std::memory_order_acquire))
++        if (playPending.exchange (false, std::memory_order_acquire) && ! editPlaybackContext.edit.getTransport().isPaused())
+             playHead.play();
+     }
+ 

@@ -1,0 +1,122 @@
+--- a/modules/tracktion_engine/timestretch/tracktion_TimeStretch.h
++++ b/modules/tracktion_engine/timestretch/tracktion_TimeStretch.h
+@@ -50,6 +50,7 @@
+         elastiqueDirectMobile = 14,     /**< Elastique Direct lower quality and lower CPU usage, optimised for mobile. */
+         signalsmithDefault = 15,        /**< Signalsmith Stretch default quality preset. */
+         signalsmithCheaper = 16,        /**< Signalsmith Stretch cheaper/faster preset. */
++        rubberbandVoice = 17,           /**< RubberBand with formant preservation for voice. */
+ 
+        #if TRACKTION_ENABLE_TIMESTRETCH_ELASTIQUE
+         defaultMode = elastiquePro      /**< Default mode. */
+--- a/modules/tracktion_engine/timestretch/tracktion_TimeStretch.cpp
++++ b/modules/tracktion_engine/timestretch/tracktion_TimeStretch.cpp
+@@ -198,6 +198,7 @@
+             case TimeStretcher::ara:                   [[ fallthrough ]];
+             case TimeStretcher::rubberbandMelodic:          [[ fallthrough ]];
+             case TimeStretcher::rubberbandPercussive:       [[ fallthrough ]];
++            case TimeStretcher::rubberbandVoice:            [[ fallthrough ]];
+             case TimeStretcher::signalsmithDefault:         [[ fallthrough ]];
+             case TimeStretcher::signalsmithCheaper:         [[ fallthrough ]];
+             default:
+@@ -395,6 +396,7 @@
+             case TimeStretcher::ara:                   [[ fallthrough ]];
+             case TimeStretcher::rubberbandMelodic:          [[ fallthrough ]];
+             case TimeStretcher::rubberbandPercussive:       [[ fallthrough ]];
++            case TimeStretcher::rubberbandVoice:            [[ fallthrough ]];
+             case TimeStretcher::signalsmithDefault:         [[ fallthrough ]];
+             case TimeStretcher::signalsmithCheaper:         [[ fallthrough ]];
+             default:
+@@ -716,8 +718,14 @@
+ 
+ struct RubberBandStretcher  : public TimeStretcher::Stretcher
+ {
+-    static int getOptionFlags (bool percussive)
+-    {
++    static int getOptionFlags (bool percussive, bool preserveFormants)
++    {
++        if (preserveFormants)
++            return RubberBand::RubberBandStretcher::OptionProcessRealTime
++                | RubberBand::RubberBandStretcher::OptionPitchHighConsistency
++                | RubberBand::RubberBandStretcher::OptionEngineFiner
++                | RubberBand::RubberBandStretcher::OptionFormantPreserved;
++
+         if (percussive)
+             return RubberBand::RubberBandStretcher::OptionProcessRealTime
+                 | RubberBand::RubberBandStretcher::OptionPitchHighConsistency
+@@ -728,9 +736,9 @@
+             | RubberBand::RubberBandStretcher::OptionWindowShort;
+     }
+ 
+-    RubberBandStretcher (double sourceSampleRate, int samplesPerBlock, int numChannels, bool percussive)
++    RubberBandStretcher (double sourceSampleRate, int samplesPerBlock, int numChannels, bool percussive, bool preserveFormants)
+         : rubberBandStretcher ((size_t) sourceSampleRate, (size_t) numChannels,
+-                               getOptionFlags (percussive)),
++                               getOptionFlags (percussive, preserveFormants)),
+           samplesPerOutputBuffer (samplesPerBlock)
+     {
+     }
+@@ -1025,6 +1033,7 @@
+ static juce::String getSoundTouchBetter()           { return "SoundTouch (" + TRANS("Better") + ")"; }
+ static juce::String getRubberBandMelodic()          { return "RubberBand (" + TRANS("Melodic") + ")"; }
+ static juce::String getRubberBandPercussive()       { return "RubberBand (" + TRANS("Percussive") + ")"; }
++static juce::String getRubberBandVoice()            { return "RubberBand (" + TRANS("Voice") + ")"; }
+ static juce::String getElastiqueDirectPro()         { return "Elastique Direct (" + TRANS("Pro") + ")"; }
+ static juce::String getElastiqueDirectEfficeint()   { return "Elastique Direct (" + TRANS("Efficient") + ")"; }
+ static juce::String getElastiqueDirectMobile()      { return "Elastique Direct (" + TRANS("Mobile") + ")"; }
+@@ -1053,6 +1062,7 @@
+        #if ! TRACKTION_ENABLE_TIMESTRETCH_RUBBERBAND
+         case rubberbandMelodic:
+         case rubberbandPercussive:
++        case rubberbandVoice:
+        #endif
+        #if ! TRACKTION_ENABLE_TIMESTRETCH_SIGNALSMITH
+         case signalsmithDefault:
+@@ -1082,6 +1092,7 @@
+        #if TRACKTION_ENABLE_TIMESTRETCH_RUBBERBAND
+         case rubberbandMelodic:
+         case rubberbandPercussive:
++        case rubberbandVoice:
+             return m;
+        #endif
+         case disabled:
+@@ -1113,6 +1124,7 @@
+    #if TRACKTION_ENABLE_TIMESTRETCH_RUBBERBAND
+     s.add (getRubberBandMelodic());
+     s.add (getRubberBandPercussive());
++    s.add (getRubberBandVoice());
+    #endif
+ 
+    #if TRACKTION_ENABLE_TIMESTRETCH_SIGNALSMITH
+@@ -1149,6 +1161,7 @@
+    #if TRACKTION_ENABLE_TIMESTRETCH_RUBBERBAND
+      if (name == getRubberBandMelodic())    return rubberbandMelodic;
+      if (name == getRubberBandPercussive()) return rubberbandPercussive;
++     if (name == getRubberBandVoice())      return rubberbandVoice;
+    #endif
+ 
+    #if TRACKTION_ENABLE_TIMESTRETCH_SOUNDTOUCH
+@@ -1187,6 +1200,7 @@
+         case soundtouchBetter:          return getSoundTouchBetter();
+         case rubberbandMelodic:         return getRubberBandMelodic();
+         case rubberbandPercussive:      return getRubberBandPercussive();
++        case rubberbandVoice:           return getRubberBandVoice();
+         case signalsmithDefault:        return getSignalsmithDefault();
+         case signalsmithCheaper:        return getSignalsmithCheaper();
+         case ara:                       return getARADefault();
+@@ -1269,13 +1283,15 @@
+        #if TRACKTION_ENABLE_TIMESTRETCH_RUBBERBAND
+         case rubberbandMelodic:
+         case rubberbandPercussive:
++        case rubberbandVoice:
+             juce::ignoreUnused (options, realtime);
+             stretcher = std::make_unique<tracktion::engine::RubberBandStretcher> (sourceSampleRate, samplesPerBlock, numChannels,
+-                                                                                  mode == rubberbandPercussive);
++                                                                                  mode == rubberbandPercussive, mode == rubberbandVoice);
+             break;
+        #else
+         case rubberbandMelodic:     [[fallthrough]];
+         case rubberbandPercussive:
++        case rubberbandVoice:
+             break;
+        #endif
+ 

@@ -1,0 +1,59 @@
+--- a/modules/juce_audio_processors_headless/format_types/juce_AudioUnitPluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_AudioUnitPluginFormatImpl.h
+@@ -688,6 +688,7 @@
+         {
+             if (getNumSteps() <= maxStringsToCache)
+                 auValueStrings = getDiscreteValueStrings();
++            syncCachedValue (false);
+         }
+ 
+         float getValue() const override
+@@ -695,7 +696,7 @@
+             return cachedValue;
+         }
+ 
+-        void syncCachedValue()
++        void syncCachedValue (bool notify = true)
+         {
+             const ScopedLock sl (pluginInstance.lock);
+ 
+@@ -704,7 +705,10 @@
+             if (AudioUnitGetParameter (pluginInstance.audioUnit, paramID, kAudioUnitScope_Global, 0, &newValue) != noErr)
+                 return;
+ 
+-            cachedValue = normaliseParamValue (newValue);
++            if (notify)
++                updateCachedValueAndNotify (normaliseParamValue (newValue));
++            else
++                cachedValue = normaliseParamValue (newValue);
+         }
+ 
+         void updateCachedValueAndNotify (float newValue)
+@@ -720,7 +724,8 @@
+         {
+             const ScopedLock sl (pluginInstance.lock);
+ 
+-            cachedValue = newValue;
++            const auto scaledValue = scaleParamValue (newValue);
++            cachedValue = normaliseParamValue (scaledValue);
+ 
+             auto* au = pluginInstance.audioUnit;
+ 
+@@ -733,7 +738,7 @@
+             parameter.mScope = kAudioUnitScope_Global;
+             parameter.mElement = 0;
+ 
+-            AUParameterSet (pluginInstance.eventListenerRef, nullptr, &parameter, scaleParamValue (newValue), 0);
++            AUParameterSet (pluginInstance.eventListenerRef, nullptr, &parameter, scaledValue, 0);
+         }
+ 
+         float getDefaultValue() const override
+@@ -1590,7 +1595,7 @@
+         param.mAudioUnit = audioUnit;
+         param.mParameterID = kAUParameterListener_AnyParameter;
+ 
+-        AUParameterListenerNotify (nullptr, nullptr, &param);
++        AUParameterListenerNotify (eventListenerRef, nullptr, &param);
+     }
+ 
+     //==============================================================================

@@ -1,0 +1,35 @@
+--- a/modules/tracktion_engine/plugins/external/tracktion_ExternalPlugin.cpp
++++ b/modules/tracktion_engine/plugins/external/tracktion_ExternalPlugin.cpp
+@@ -678,6 +678,7 @@
+     desc.fileOrIdentifier = state[IDs::filename];
+     setEnabled (state.getProperty (IDs::enabled, true));
+     desc.name = state[IDs::name];
++    desc.uniqueIdString = state.getProperty ("uniqueIdString").toString();
+     desc.manufacturerName = state[IDs::manufacturer];
+     identiferString = createIdentifierString (desc);
+ 
+@@ -691,6 +692,7 @@
+                               IDs::uniqueId, juce::String::toHexString (desc.uniqueId),
+                               IDs::uid, juce::String::toHexString (desc.deprecatedUid),
+                               IDs::filename, desc.fileOrIdentifier,
++                              juce::Identifier ("uniqueIdString"), desc.uniqueIdString,
+                               IDs::name, desc.name,
+                               IDs::manufacturer, desc.manufacturerName);
+ 
+@@ -907,6 +909,16 @@
+     CRASH_TRACER
+     auto& pm = engine.getPluginManager();
+ 
++    if (desc.uniqueIdString.isNotEmpty())
++    {
++        for (const auto& candidate : pm.knownPluginList.getTypes())
++            if (candidate.uniqueIdString == desc.uniqueIdString
++                && (desc.fileOrIdentifier.isEmpty() || candidate.fileOrIdentifier == desc.fileOrIdentifier))
++                return std::make_unique<juce::PluginDescription> (candidate);
++
++        return {};
++    }
++
+     if (auto p = pm.knownPluginList.getTypeForIdentifierString (createIdentifierString (desc)))
+         return p;
+ 

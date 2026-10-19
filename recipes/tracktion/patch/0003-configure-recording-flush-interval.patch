@@ -1,0 +1,98 @@
+--- a/modules/tracktion_engine/utilities/tracktion_EngineBehaviour.h
++++ b/modules/tracktion_engine/utilities/tracktion_EngineBehaviour.h
+@@ -140,6 +140,9 @@
+ 
+     /// Should track contents be audible whilst a recording is in progress
+     virtual bool muteTrackContentsWhilstRecording()                                 { return false; }
++
++    /** Returns the sample interval for recording file flushes, or the default if empty. */
++    virtual std::optional<int> getAudioRecordingFlushIntervalSamples (double)        { return {}; }
+ 
+     /// 0 = normal, 1 = high, 2 = realtime
+     virtual void setProcessPriority (int /*level*/)                                 {}
+--- a/modules/tracktion_engine/audio_files/tracktion_AudioFileWriter.h
++++ b/modules/tracktion_engine/audio_files/tracktion_AudioFileWriter.h
+@@ -60,13 +60,17 @@
+     /** Appends a block of samples to the file from an audio format reader. */
+     bool writeFromAudioReader (juce::AudioFormatReader&, SampleCount startSample, SampleCount numSamples);
+ 
++    /** Sets the sample interval between file flushes. */
++    void setFlushIntervalSamples (int);
++
+     /** Deletes the writer and releases the file handle. */
+     void closeForWriting();
+ 
+     AudioFile file;
+ 
+ private:
+-    int samplesUntilFlush;
++    int flushIntervalSamples = 48000 * 6;
++    int samplesUntilFlush = flushIntervalSamples;
+     std::unique_ptr<juce::AudioFormatWriter> writer;
+     juce::CriticalSection writerLock;
+ };
+--- a/modules/tracktion_engine/audio_files/tracktion_AudioFile.cpp
++++ b/modules/tracktion_engine/audio_files/tracktion_AudioFile.cpp
+@@ -140,8 +140,6 @@
+ 
+ 
+ //==============================================================================
+-const int numSamplesPerFlush = 48000 * 6;
+-
+ AudioFileWriter::AudioFileWriter (const AudioFile& f,
+                                   juce::AudioFormat* formatToUse,
+                                   int numChannels,
+@@ -149,7 +147,7 @@
+                                   int bitsPerSample,
+                                   const juce::StringPairArray& metadata,
+                                   int quality)
+-    : file (f), samplesUntilFlush (numSamplesPerFlush)
++    : file (f)
+ {
+     CRASH_TRACER
+     f.engine->getAudioFileManager().releaseFile (file);
+@@ -171,7 +169,7 @@
+                                   const juce::StringPairArray& metadata,
+                                   int quality,
+                                   const juce::AudioChannelSet& channelLayout)
+-    : file (f), samplesUntilFlush (numSamplesPerFlush)
++    : file (f)
+ {
+     CRASH_TRACER
+     f.engine->getAudioFileManager().releaseFile (file);
+@@ -194,6 +192,14 @@
+ double AudioFileWriter::getSampleRate() const noexcept      { jassert (isOpen()); const juce::ScopedLock sl (writerLock); return writer->getSampleRate(); }
+ int AudioFileWriter::getNumChannels() const noexcept        { jassert (isOpen()); const juce::ScopedLock sl (writerLock); return writer->getNumChannels(); }
+ 
++void AudioFileWriter::setFlushIntervalSamples (int numSamples)
++{
++    jassert (numSamples > 0);
++    const juce::ScopedLock sl (writerLock);
++    flushIntervalSamples = numSamples;
++    samplesUntilFlush = numSamples;
++}
++
+ void AudioFileWriter::closeForWriting()
+ {
+     {
+@@ -217,7 +223,7 @@
+ 
+         if (samplesUntilFlush <= 0)
+         {
+-            samplesUntilFlush = numSamplesPerFlush;
++            samplesUntilFlush = flushIntervalSamples;
+             writer->flush();
+         }
+ 
+--- a/modules/tracktion_engine/playback/devices/tracktion_WaveInputDevice.cpp
++++ b/modules/tracktion_engine/playback/devices/tracktion_WaveInputDevice.cpp
+@@ -398,6 +398,9 @@
+                                                                 (int) wi.getChannels().getNumChannels(),
+                                                                 rc->sampleRate, wi.bitDepth, metadata, 0,
+                                                                 wi.getChannelSet());
++
++            if (auto interval = edit.engine.getEngineBehaviour().getAudioRecordingFlushIntervalSamples (rc->sampleRate))
++                rc->fileWriter->setFlushIntervalSamples (*interval);
+ 
+             if (rc->fileWriter->isOpen())
+             {

@@ -1,0 +1,463 @@
+--- a/modules/tracktion_engine/playback/tracktion_EditPlaybackContext.h
++++ b/modules/tracktion_engine/playback/tracktion_EditPlaybackContext.h
+@@ -111,6 +111,9 @@
+     /** This will increase/decrease playback speed by changing the tempo, maintaining pitch where possible. */
+     void setTempoAdjustment (double plusOrMinusProportion);
+ 
++    /** Sets the playback speed from 0.01 to 32. Pitch changes with the speed. */
++    void setPlaybackSpeed (double ratio);
++
+     /** Posts a transport position change.
+         Using the second parameter it's possible to delay position changes in order to quantise them to some musical sense.
+         Pending changes will be cancelled automatically if:
+--- a/modules/tracktion_engine/playback/tracktion_EditPlaybackContext.cpp
++++ b/modules/tracktion_engine/playback/tracktion_EditPlaybackContext.cpp
+@@ -290,6 +290,13 @@
+         blockLengthScaleFactor = 1.0 + std::clamp (plusOrMinusProportion, -0.5, 0.5);
+     }
+ 
++    void setPlaybackSpeed (double ratio)
++    {
++        playbackSpeed = std::clamp (ratio, 0.01, 32.0);
++        playbackPitchShift = 12.0 * std::log2 (playbackSpeed);
++        playHead.setPlaybackRate (playbackSpeed);
++    }
++
+     void checkForTempoSequenceChanges()
+     {
+         const auto& internalSequence = tempoSequence.getInternalSequence();
+@@ -319,10 +326,12 @@
+         if (blockLengthScaleFactor != 1.0)
+             sampleDuration *= blockLengthScaleFactor;
+ 
++
+         referenceStreamRange = juce::Range<double>::withStartAndLength (referenceStreamRange.getEnd(), sampleDuration);
+         playHead.setReferenceSampleRange (getReferenceSampleRange());
+         numSamplesToProcess = static_cast<choc::buffer::FrameCount> (numSamples);
+-        processState.setPlaybackSpeedRatio (blockLengthScaleFactor);
++        processState.setPlaybackSpeedRatio (blockLengthScaleFactor * playbackSpeed);
++        processState.playbackPitchShift = playbackPitchShift;
+ 
+         // This needs to be called after the playhead reference range has been set above
+         checkForTempoSequenceChanges();
+@@ -461,6 +470,7 @@
+     std::atomic<double> pendingPosition { 0.0 }, pendingPositionJumpTime { 0.0 };
+     std::atomic<bool> positionUpdatePending { false }, pendingRollInToLoop { false }, pendingPositionJumpTimeValid { false }, playPending { false };
+     double speedCompensation = 0.0, blockLengthScaleFactor = 1.0;
++    double playbackSpeed = 1.0, playbackPitchShift = 0.0;
+     std::vector<std::unique_ptr<juce::LagrangeInterpolator>> interpolators;
+     bool isUsingInterpolator = false;
+ 
+@@ -1156,6 +1166,15 @@
+         nodePlaybackContext->setTempoAdjustment (plusOrMinusProportion);
+ }
+ 
++void EditPlaybackContext::setPlaybackSpeed (double ratio)
++{
++    TRACKTION_ASSERT_MESSAGE_THREAD
++    const juce::ScopedLock lock (edit.engine.getDeviceManager().deviceManager.getAudioCallbackLock());
++
++    if (nodePlaybackContext)
++        nodePlaybackContext->setPlaybackSpeed (ratio);
++}
++
+ void EditPlaybackContext::postPosition (TimePosition positionToJumpTo, std::optional<TimePosition> whenToJump)
+ {
+     if (nodePlaybackContext)
+--- a/modules/tracktion_engine/playback/graph/tracktion_TracktionEngineNode.h
++++ b/modules/tracktion_engine/playback/graph/tracktion_TracktionEngineNode.h
+@@ -78,6 +78,7 @@
+ 
+     tracktion::graph::PlayHeadState& playHeadState;
+     double sampleRate = 44100.0, playbackSpeedRatio = 1.0;
++    double playbackPitchShift = 0.0;
+     int numSamples = 0;
+     juce::Range<int64_t> referenceSampleRange, timelineSampleRange;
+     TimeRange editTimeRange;
+@@ -130,6 +131,9 @@
+     /** Returns the playback speed ratio of the current process block. */
+     double getPlaybackSpeedRatio() const;
+ 
++    /** Returns the playback pitch change in semitones. */
++    double getPlaybackPitchShift() const;
++
+     //==============================================================================
+     /** May return the time of the next tempo or time sig change. */
+     std::optional<TimePosition> getTimeOfNextChange() const;
+--- a/modules/tracktion_engine/playback/graph/tracktion_TracktionEngineNode.cpp
++++ b/modules/tracktion_engine/playback/graph/tracktion_TracktionEngineNode.cpp
+@@ -42,10 +42,13 @@
+     referenceSampleRange = newReferenceSampleRange;
+ 
+     const auto splitTimelineRange = referenceSampleRangeToSplitTimelineRange (playHeadState.playHead, newReferenceSampleRange);
+-    jassert (! splitTimelineRange.isSplit);
++    const auto& playHead = playHeadState.playHead;
++    const bool quantisedLoopEnd = playHead.isLooping() && playHead.getPlaybackRate() != 1.0;
++    jassert (! splitTimelineRange.isSplit || quantisedLoopEnd);
+     timelineSampleRange = splitTimelineRange.timelineRange1;
+-    jassert (timelineSampleRange.getLength() == 0
+-             || timelineSampleRange.getLength() == newReferenceSampleRange.getLength());
++    const auto expectedLength = playHead.referenceSampleRangeToSourceRangeUnlooped (newReferenceSampleRange).getLength();
++    jassert (timelineSampleRange.getLength() == expectedLength
++             || (quantisedLoopEnd && std::abs (timelineSampleRange.getLength() - expectedLength) <= std::ceil (playHead.getPlaybackRate())));
+ 
+     editTimeRange = timeRangeFromSamples (timelineSampleRange, sampleRate);
+ 
+@@ -144,6 +147,11 @@
+     return processState->playbackSpeedRatio;
+ }
+ 
++double TracktionEngineNode::getPlaybackPitchShift() const
++{
++    return processState->playbackPitchShift;
++}
++
+ std::optional<TimePosition> TracktionEngineNode::getTimeOfNextChange() const
+ {
+     if (auto tempoPosition = processState->getTempoSequencePosition())
+--- a/modules/tracktion_engine/playback/graph/tracktion_DynamicOffsetNode.cpp
++++ b/modules/tracktion_engine/playback/graph/tracktion_DynamicOffsetNode.cpp
+@@ -249,6 +249,7 @@
+     const auto dynamicOffsetTimeForChildNodes = offsetEndTime - offsetStartTime;
+ 
+     localProcessState.setPlaybackSpeedRatio (getPlaybackSpeedRatio());
++    localProcessState.playbackPitchShift = getPlaybackPitchShift();
+     localProcessState.update (getSampleRate(), pc.referenceSampleRange,
+                               ProcessState::UpdateContinuityFlags::no);
+ 
+--- a/modules/tracktion_engine/playback/graph/tracktion_SlotControlNode.cpp
++++ b/modules/tracktion_engine/playback/graph/tracktion_SlotControlNode.cpp
+@@ -258,6 +258,7 @@
+     }
+ 
+     localProcessState.setPlaybackSpeedRatio (getPlaybackSpeedRatio());
++    localProcessState.playbackPitchShift = getPlaybackPitchShift();
+     localProcessState.update (getSampleRate(), pc.referenceSampleRange,
+                               ProcessState::UpdateContinuityFlags::no);
+     auto& ps = getProcessState();
+--- a/modules/tracktion_engine/playback/graph/tracktion_ContainerClipNode.cpp
++++ b/modules/tracktion_engine/playback/graph/tracktion_ContainerClipNode.cpp
+@@ -153,6 +153,7 @@
+     // Syncronise positions
+     const auto playheadOffset = toSamples (editStartTimeOfLocalTimeline, sampleRate);
+     playerContext->processState.setPlaybackSpeedRatio (getPlaybackSpeedRatio());
++    playerContext->processState.playbackPitchShift = getPlaybackPitchShift();
+ 
+     int64_t newPosition = editPlayHead.getPosition() - playheadOffset + loopRangeSamples.getStart();
+ 
+--- a/modules/tracktion_engine/playback/graph/tracktion_WaveNode.cpp
++++ b/modules/tracktion_engine/playback/graph/tracktion_WaveNode.cpp
+@@ -1083,9 +1083,10 @@
+         assert (timeStretchSource != nullptr);
+     }
+ 
+-    void setKey (tempo::Key newKey)
++    void setKey (tempo::Key newKey, double playbackShift)
+     {
+         key = newKey;
++        playbackPitchShift = playbackShift;
+     }
+ 
+     bool readSamples (choc::buffer::ChannelArrayView<float>& destBuffer) override
+@@ -1098,11 +1099,11 @@
+             while (transposeBase > 6)  transposeBase -= 12;
+             while (transposeBase < -6) transposeBase += 12;
+ 
+-            timeStretchSource->setPitch (static_cast<double> (transposeBase));
++            timeStretchSource->setPitch (static_cast<double> (transposeBase) + playbackPitchShift);
+         }
+         else
+         {
+-            timeStretchSource->setPitch (static_cast<double> (numSemitonesShift));
++            timeStretchSource->setPitch (static_cast<double> (numSemitonesShift) + playbackPitchShift);
+         }
+ 
+         return SingleInputAudioReader::readSamples (destBuffer);
+@@ -1114,6 +1115,7 @@
+ 
+     bool syncToKey = false;
+     float numSemitonesShift = 0.0f;
++    double playbackPitchShift = 0.0;
+ };
+ 
+ 
+@@ -2272,16 +2274,9 @@
+         }
+         else
+         {
+-            if (pitchChangeSemitones != 0.0f)
+-            {
+-                auto pitchAdjuster = std::make_unique<PitchAdjustReader> (std::move (timeStretchReader), timeStretchReader.get(), pitchChangeSemitones);
+-                pitchAdjustReader  = pitchAdjuster.get();
+-                timeRangeReader    = std::make_unique<TimeRangeReader> (std::move (pitchAdjuster), timeStretcher);
+-            }
+-            else
+-            {
+-                timeRangeReader    = std::make_unique<TimeRangeReader> (std::move (timeStretchReader), timeStretcher);
+-            }
++            auto pitchAdjuster = std::make_unique<PitchAdjustReader> (std::move (timeStretchReader), timeStretchReader.get(), pitchChangeSemitones);
++            pitchAdjustReader  = pitchAdjuster.get();
++            timeRangeReader    = std::make_unique<TimeRangeReader> (std::move (pitchAdjuster), timeStretcher);
+         }
+     }
+ 
+@@ -2438,7 +2433,7 @@
+         resamplerReader->setGains (gains[0], gains[1]);
+ 
+     if (pitchAdjustReader != nullptr)
+-        pitchAdjustReader->setKey (getKeyToSyncTo (sectionEditTime.getStart()));
++        pitchAdjustReader->setKey (getKeyToSyncTo (sectionEditTime.getStart()), getPlaybackPitchShift());
+ 
+     // Read through the audio stack
+     const auto isContiguous = getPlayHeadState().isContiguousWithPreviousBlock();
+--- a/modules/tracktion_graph/tracktion_graph/tracktion_PlayHead.h
++++ b/modules/tracktion_graph/tracktion_graph/tracktion_PlayHead.h
+@@ -126,6 +126,13 @@
+     int64_t getScrubbingBlockLength() const;
+ 
+     //==============================================================================
++    /** Sets the playback rate. Call from the control thread while audio processing is stopped or locked. */
++    void setPlaybackRate (double);
++    double getPlaybackRate() const noexcept;
++
++    /** Returns the unlooped timeline position with fractional samples. */
++    double referenceSamplePositionToTimelinePositionUnloopedFractional (int64_t) const;
++
+     /** Converts a reference sample position to a timeline position. */
+     int64_t referenceSamplePositionToTimelinePosition (int64_t referenceSamplePosition) const;
+ 
+@@ -157,6 +164,7 @@
+         SyncPositions() noexcept = default;
+         int64_t referenceSyncPosition = 0;
+         int64_t playoutSyncPosition = 0;
++        double rateAdjustedReferenceSyncPosition = 0.0;
+     };
+ 
+     MultipleWriterSeqLock<SyncPositions> syncPositions;
+@@ -166,6 +174,18 @@
+     MultipleWriterSeqLock<juce::Range<int64_t>> timelinePlayRange;
+     std::atomic<int64_t> scrubbingBlockLength { static_cast<int64_t> (0.08 * 44100.0) };
+ 
++    struct RateChange
++    {
++        int64_t referenceStart = 0;
++        double adjustedStart = 0.0;
++        double ratio = 1.0;
++        const RateChange* previous = nullptr;
++    };
++
++    std::vector<std::unique_ptr<RateChange>> rateChanges;
++    std::atomic<const RateChange*> currentRateChange { nullptr };
++    double rateAdjustedReferencePosition (int64_t) const;
++
+     std::atomic<int> speed { 0 };
+     std::atomic<bool> looping { false }, userDragging { false }, rollInToLoop { false };
+ 
+@@ -173,7 +193,11 @@
+ 
+     //==============================================================================
+     SyncPositions getSyncPositions() const              { return syncPositions.load(); }
+-    void setSyncPositions (SyncPositions newPositions)  { syncPositions.store (newPositions); }
++    void setSyncPositions (SyncPositions newPositions)
++    {
++        newPositions.rateAdjustedReferenceSyncPosition = rateAdjustedReferencePosition (newPositions.referenceSyncPosition);
++        syncPositions.store (newPositions);
++    }
+ 
+     void userInteraction()  { userInteractionTime = std::chrono::system_clock::now(); }
+ };
+@@ -321,17 +345,52 @@
+     return referenceSamplePositionToTimelinePositionUnlooped (referenceSamplePosition);
+ }
+ 
++inline void PlayHead::setPlaybackRate (double ratio)
++{
++    jassert (ratio > 0.0);
++    const auto previous = currentRateChange.load (std::memory_order_acquire);
++    if (ratio == (previous != nullptr ? previous->ratio : 1.0))
++        return;
++
++    const auto start = referenceSampleRange.load().getEnd();
++    auto change = std::make_unique<RateChange> (RateChange { start, rateAdjustedReferencePosition (start), ratio, previous });
++    const auto result = change.get();
++    rateChanges.push_back (std::move (change));
++    currentRateChange.store (result, std::memory_order_release);
++}
++
++inline double PlayHead::getPlaybackRate() const noexcept
++{
++    const auto change = currentRateChange.load (std::memory_order_acquire);
++    return change != nullptr ? change->ratio : 1.0;
++}
++
++inline double PlayHead::rateAdjustedReferencePosition (int64_t referencePosition) const
++{
++    auto change = currentRateChange.load (std::memory_order_acquire);
++    while (change != nullptr && referencePosition < change->referenceStart)
++        change = change->previous;
++
++    return change != nullptr ? change->adjustedStart + (referencePosition - change->referenceStart) * change->ratio
++                             : static_cast<double> (referencePosition);
++}
++
++inline double PlayHead::referenceSamplePositionToTimelinePositionUnloopedFractional (int64_t referenceSamplePosition) const
++{
++    const auto syncPos = getSyncPositions();
++    return syncPos.playoutSyncPosition + (rateAdjustedReferencePosition (referenceSamplePosition)
++                                         - syncPos.rateAdjustedReferenceSyncPosition) * speed;
++}
++
+ inline int64_t PlayHead::referenceSamplePositionToTimelinePositionUnlooped (int64_t referenceSamplePosition) const
+ {
+-    const auto syncPos = getSyncPositions();
+-    return syncPos.playoutSyncPosition + (referenceSamplePosition - syncPos.referenceSyncPosition) * speed;
++    return std::llround (referenceSamplePositionToTimelinePositionUnloopedFractional (referenceSamplePosition));
+ }
+ 
+ inline juce::Range<int64_t> PlayHead::referenceSampleRangeToSourceRangeUnlooped (juce::Range<int64_t> sourceReferenceSampleRange) const
+ {
+-    const auto syncPos = getSyncPositions();
+-    return { syncPos.playoutSyncPosition + (sourceReferenceSampleRange.getStart() - syncPos.referenceSyncPosition) * speed,
+-             syncPos.playoutSyncPosition + (sourceReferenceSampleRange.getEnd() - syncPos.referenceSyncPosition) * speed };
++    return { referenceSamplePositionToTimelinePositionUnlooped (sourceReferenceSampleRange.getStart()),
++             referenceSamplePositionToTimelinePositionUnlooped (sourceReferenceSampleRange.getEnd()) };
+ }
+ 
+ inline int64_t PlayHead::linearPositionToLoopPosition (int64_t position, juce::Range<int64_t> loopRange)
+@@ -394,6 +453,13 @@
+         s = PlayHead::linearPositionToLoopPosition (s, pr);
+         e = PlayHead::linearPositionToLoopPosition (e, pr);
+ 
++        if (s == e && unloopedRange.getLength() >= pr.getLength())
++        {
++            if (s == pr.getStart())
++                return { pr };
++            return { { s, pr.getEnd() }, { pr.getStart(), e } };
++        }
++
+         if (s > e)
+         {
+             if (s >= pr.getEnd())   return { { pr.getStart(), e } };
+--- a/modules/tracktion_engine/plugins/tracktion_Plugin.h
++++ b/modules/tracktion_engine/plugins/tracktion_Plugin.h
+@@ -97,6 +97,14 @@
+ 
+     /** The edit time range this context represents. */
+     TimeRange editTime;
++
++    /** Returns the edit time at a sample boundary in this buffer. */
++    TimePosition getEditTimeAtSample (int offset) const;
++
++    const graph::PlayHead* playHead = nullptr;
++    juce::Range<int64_t> referenceSampleRange;
++    double referenceSampleRate = 44100.0;
++    int latencySamples = 0;
+ 
+     /** True if the the playhead is currently playing. */
+     bool isPlaying = false;
+--- a/modules/tracktion_engine/plugins/tracktion_Plugin.cpp
++++ b/modules/tracktion_engine/plugins/tracktion_Plugin.cpp
+@@ -38,6 +38,20 @@
+ {}
+ 
+ //==============================================================================
++TimePosition PluginRenderContext::getEditTimeAtSample (int offset) const
++{
++    if (playHead != nullptr && bufferNumSamples > 0)
++    {
++        const auto referencePosition = referenceSampleRange.getStart()
++                                       + std::llround ((offset - latencySamples) * (static_cast<double> (referenceSampleRange.getLength()) / bufferNumSamples));
++        const double position = playHead->isLooping() ? static_cast<double> (playHead->referenceSamplePositionToTimelinePosition (referencePosition))
++                                                      : playHead->referenceSamplePositionToTimelinePositionUnloopedFractional (referencePosition);
++        return TimePosition::fromSeconds (position / referenceSampleRate);
++    }
++
++    return editTime.getStart() + editTime.getLength() * (bufferNumSamples > 0 ? static_cast<double> (offset) / bufferNumSamples : 0.0);
++}
++
+ Plugin::Wire::Wire (const juce::ValueTree& v, juce::UndoManager* um)  : state (v)
+ {
+     sourceChannelIndex.referTo (state, IDs::srcChan, um);
+--- a/modules/tracktion_engine/playback/graph/tracktion_PluginNode.h
++++ b/modules/tracktion_engine/playback/graph/tracktion_PluginNode.h
+@@ -79,7 +79,7 @@
+ 
+     //==============================================================================
+     void initialisePlugin (double sampleRateToUse, int blockSizeToUse);
+-    PluginRenderContext getPluginRenderContext (TimeRange, juce::AudioBuffer<float>&);
++    PluginRenderContext getPluginRenderContext (TimeRange, juce::AudioBuffer<float>&, juce::Range<int64_t>);
+     void replaceLatencyProcessorIfPossible (NodeGraph*);
+ };
+ 
+--- a/modules/tracktion_engine/playback/graph/tracktion_PluginNode.cpp
++++ b/modules/tracktion_engine/playback/graph/tracktion_PluginNode.cpp
+@@ -252,7 +252,9 @@
+             // Process the plugin
+             plugin->applyToBufferWithAutomation (getPluginRenderContext ({ blockTimeRange.getStart() + toDuration (subBlockTimeRange.getStart()),
+                                                                            blockTimeRange.getStart() + toDuration (subBlockTimeRange.getEnd()) },
+-                                                                         outputAudioBuffer));
++                                                                         outputAudioBuffer,
++                                                                         { pc.referenceSampleRange.getStart() + std::llround (blockPropStart * pc.referenceSampleRange.getLength()),
++                                                                           pc.referenceSampleRange.getStart() + std::llround (blockPropEnd * pc.referenceSampleRange.getLength()) }));
+ 
+             // Then copy the buffers to the outputs
+             if (subBlockNum == 0)
+@@ -315,14 +317,22 @@
+     latencyNumSamples = juce::roundToInt (plugin->getLatencySeconds() * sampleRate);
+ }
+ 
+-PluginRenderContext PluginNode::getPluginRenderContext (TimeRange editTime, juce::AudioBuffer<float>& destBuffer)
+-{
+-    return { &destBuffer,
+-             0, destBuffer.getNumSamples(),
+-             &midiMessageArray, 0.0,
+-             editTime + automationAdjustmentTime,
+-             playHeadState.playHead.isPlaying(), playHeadState.playHead.isUserDragging(),
+-             isRendering, canProcessBypassed };
++PluginRenderContext PluginNode::getPluginRenderContext (TimeRange editTime, juce::AudioBuffer<float>& destBuffer,
++                                                        juce::Range<int64_t> referenceRange)
++{
++    PluginRenderContext context { &destBuffer,
++                                  0, destBuffer.getNumSamples(),
++                                  &midiMessageArray, 0.0,
++                                  editTime + automationAdjustmentTime,
++                                  playHeadState.playHead.isPlaying(), playHeadState.playHead.isUserDragging(),
++                                  isRendering, canProcessBypassed };
++    context.playHead = &playHeadState.playHead;
++    context.referenceSampleRange = referenceRange;
++    context.referenceSampleRate = sampleRate;
++    context.latencySamples = getNodeProperties().latencyNumSamples;
++    if (! playHeadState.playHead.isLooping())
++        context.editTime = { context.getEditTimeAtSample (0), context.getEditTimeAtSample (context.bufferNumSamples) };
++    return context;
+ }
+ 
+ void PluginNode::replaceLatencyProcessorIfPossible (NodeGraph* nodeGraphToReplace)
+--- a/modules/tracktion_engine/playback/graph/tracktion_TracktionNodePlayer.h
++++ b/modules/tracktion_engine/playback/graph/tracktion_TracktionNodePlayer.h
+@@ -85,6 +85,25 @@
+         int numMisses = 0;
+         playHeadState.playHead.setReferenceSampleRange (pc.referenceSampleRange);
+ 
++        auto& playHead = playHeadState.playHead;
++        if (playHead.isLooping() && ! playHead.isUserDragging())
++        {
++            const auto loop = playHead.getLoopRange();
++            auto start = pc.referenceSampleRange.getStart();
++            while (start < pc.referenceSampleRange.getEnd())
++            {
++                auto position = playHead.referenceSamplePositionToTimelinePositionUnloopedFractional (start);
++                if (! playHead.isRollingIntoLoop())
++                    position = loop.getStart() + std::fmod (std::fmod (position - loop.getStart(), loop.getLength()) + loop.getLength(), loop.getLength());
++
++                const auto untilLoopEnd = static_cast<int64_t> (std::ceil ((loop.getEnd() - position) / playHead.getPlaybackRate()));
++                const auto length = std::max<int64_t> (1, std::min (untilLoopEnd, pc.referenceSampleRange.getEnd() - start));
++                numMisses += processReferenceRange (pc, { start, start + length });
++                start += length;
++            }
++            return numMisses;
++        }
++
+         // Check to see if the timeline needs to be processed in two halves due to looping
+         const auto splitTimelineRange = referenceSampleRangeToSplitTimelineRange (playHeadState.playHead, pc.referenceSampleRange);
+ 

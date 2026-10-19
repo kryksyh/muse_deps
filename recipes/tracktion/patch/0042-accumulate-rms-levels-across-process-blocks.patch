@@ -1,0 +1,94 @@
+--- a/modules/tracktion_engine/playback/tracktion_LevelMeasurer.h
++++ b/modules/tracktion_engine/playback/tracktion_LevelMeasurer.h
+@@ -42,7 +42,8 @@
+     {
+         peakMode     = 0,
+         RMSMode      = 1,
+-        sumDiffMode  = 2
++        sumDiffMode  = 2,
++        RMSAccumulatedMode = 3
+     };
+ 
+     void setMode (Mode);
+@@ -58,6 +59,8 @@
+     {
+         DbTimePair level;
+         bool overloaded = false;
++        double rmsSumSquares = 0.0;
++        int rmsSamples = 0;
+     };
+ 
+     struct Client
+@@ -86,7 +89,14 @@
+     private:
+         void ensureNumChannels (int needed);
+ 
++        struct RmsLevel
++        {
++            double sumSquares = 0.0;
++            uint64_t numSamples = 0;
++        };
++
+         std::vector<DbTimePair> audioLevels;
++        std::vector<RmsLevel> rmsLevels;
+         std::vector<bool> overload;
+         DbTimePair midiLevels;
+         std::atomic<int> numChannelsUsed { 0 };
+--- a/modules/tracktion_engine/playback/tracktion_LevelMeasurer.cpp
++++ b/modules/tracktion_engine/playback/tracktion_LevelMeasurer.cpp
+@@ -63,6 +63,7 @@
+     for (auto& l : audioLevels)
+         l = {};
+ 
++    std::fill (rmsLevels.begin(), rmsLevels.end(), RmsLevel {});
+     std::fill (overload.begin(), overload.end(), false);
+ 
+     midiLevels = {};
+@@ -101,6 +102,12 @@
+         return {};
+ 
+     auto result = audioLevels[(size_t) chan];
++    auto& rms = rmsLevels[(size_t) chan];
++
++    if (rms.numSamples > 0)
++        result.dB = gainToDb (static_cast<float> (std::sqrt (rms.sumSquares / rms.numSamples)));
++
++    rms = {};
+     audioLevels[(size_t) chan].dB = -100.0f;
+     return result;
+ }
+@@ -136,6 +143,7 @@
+     if (needed > (int) audioLevels.size())
+     {
+         audioLevels.resize ((size_t) needed);
++        rmsLevels.resize ((size_t) needed);
+         overload.resize ((size_t) needed, false);
+     }
+ }
+@@ -170,6 +178,10 @@
+ 
+         if (levels[i].overloaded)
+             overload[(size_t) i] = true;
++
++        auto& rms = rmsLevels[(size_t) i];
++        rms.sumSquares += levels[i].rmsSumSquares;
++        rms.numSamples += static_cast<uint64_t> (levels[i].rmsSamples);
+     }
+ }
+ 
+@@ -214,7 +226,14 @@
+                             ? buffer.getMagnitude (i, start, numSamples)
+                             : buffer.getRMSLevel (i, start, numSamples);
+ 
+-            channelLevels[(size_t) i] = { { now, gainToDb (gain) }, gain > 0.999f };
++            auto& level = channelLevels[(size_t) i];
++            level = { { now, gainToDb (gain) }, gain > 0.999f };
++
++            if (mode == LevelMeasurer::RMSAccumulatedMode)
++            {
++                level.rmsSumSquares = static_cast<double> (gain) * gain * numSamples;
++                level.rmsSamples = numSamples;
++            }
+         }
+     }
+ 

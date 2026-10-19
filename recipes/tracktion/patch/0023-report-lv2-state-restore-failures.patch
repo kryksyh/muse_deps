@@ -1,0 +1,291 @@
+--- a/modules/juce_audio_processors_headless/format_types/LV2_SDK/lilv/lilv/lilv.h
++++ b/modules/juce_audio_processors_headless/format_types/LV2_SDK/lilv/lilv/lilv.h
+@@ -1696,6 +1696,16 @@
+                    uint32_t                  flags,
+                    const LV2_Feature* const* features);
+ 
++/** Restore state and return the plugin restore status. */
++LILV_API
++int
++lilv_state_restore_checked(const LilvState*          state,
++                   LilvInstance*             instance,
++                   LilvSetPortValueFunc      set_value,
++                   void*                     user_data,
++                   uint32_t                  flags,
++                   const LV2_Feature* const* features);
++
+ /**
+    Save state to a file.
+ 
+--- a/modules/juce_audio_processors_headless/format_types/LV2_SDK/lilv/src/state.c
++++ b/modules/juce_audio_processors_headless/format_types/LV2_SDK/lilv/src/state.c
+@@ -518,6 +518,60 @@
+   }
+ }
+ 
++int
++lilv_state_restore_checked(const LilvState*          state,
++                   LilvInstance*             instance,
++                   LilvSetPortValueFunc      set_value,
++                   void*                     user_data,
++                   uint32_t                  flags,
++                   const LV2_Feature* const* features)
++{
++  if (!state) {
++    LILV_ERROR("lilv_state_restore() called on NULL state\n");
++    return LV2_STATE_ERR_UNKNOWN;
++  }
++
++  LV2_State_Map_Path map_path = {
++    (LilvState*)state, abstract_path, absolute_path};
++  LV2_Feature map_feature = {LV2_STATE__mapPath, &map_path};
++
++  LV2_State_Free_Path free_path    = {NULL, lilv_free_path};
++  LV2_Feature         free_feature = {LV2_STATE__freePath, &free_path};
++
++  if (instance) {
++    const LV2_Descriptor* desc = instance->lv2_descriptor;
++    if (desc->extension_data) {
++      const LV2_State_Interface* iface =
++        (const LV2_State_Interface*)desc->extension_data(LV2_STATE__interface);
++
++      if (iface && iface->restore) {
++        const LV2_Feature** sfeatures =
++          add_features(features, &map_feature, NULL, &free_feature);
++
++        const LV2_State_Status status = iface->restore(instance->lv2_handle,
++                       retrieve_callback,
++                       (LV2_State_Handle)state,
++                       flags,
++                       sfeatures);
++
++        free(sfeatures);
++        if (status != LV2_STATE_SUCCESS) {
++          return status;
++        }
++      } else if (state->props.n > 0) {
++        return LV2_STATE_ERR_NO_FEATURE;
++      }
++    } else if (state->props.n > 0) {
++      return LV2_STATE_ERR_NO_FEATURE;
++    }
++  }
++
++  if (set_value) {
++    lilv_state_emit_port_values(state, set_value, user_data);
++  }
++  return LV2_STATE_SUCCESS;
++}
++
+ void
+ lilv_state_restore(const LilvState*          state,
+                    LilvInstance*             instance,
+@@ -526,42 +580,7 @@
+                    uint32_t                  flags,
+                    const LV2_Feature* const* features)
+ {
+-  if (!state) {
+-    LILV_ERROR("lilv_state_restore() called on NULL state\n");
+-    return;
+-  }
+-
+-  LV2_State_Map_Path map_path = {
+-    (LilvState*)state, abstract_path, absolute_path};
+-  LV2_Feature map_feature = {LV2_STATE__mapPath, &map_path};
+-
+-  LV2_State_Free_Path free_path    = {NULL, lilv_free_path};
+-  LV2_Feature         free_feature = {LV2_STATE__freePath, &free_path};
+-
+-  if (instance) {
+-    const LV2_Descriptor* desc = instance->lv2_descriptor;
+-    if (desc->extension_data) {
+-      const LV2_State_Interface* iface =
+-        (const LV2_State_Interface*)desc->extension_data(LV2_STATE__interface);
+-
+-      if (iface && iface->restore) {
+-        const LV2_Feature** sfeatures =
+-          add_features(features, &map_feature, NULL, &free_feature);
+-
+-        iface->restore(instance->lv2_handle,
+-                       retrieve_callback,
+-                       (LV2_State_Handle)state,
+-                       flags,
+-                       sfeatures);
+-
+-        free(sfeatures);
+-      }
+-    }
+-  }
+-
+-  if (set_value) {
+-    lilv_state_emit_port_values(state, set_value, user_data);
+-  }
++  lilv_state_restore_checked(state, instance, set_value, user_data, flags, features);
+ }
+ 
+ static void
+--- a/modules/juce_audio_processors_headless/utilities/juce_AudioPluginExtensions.h
++++ b/modules/juce_audio_processors_headless/utilities/juce_AudioPluginExtensions.h
+@@ -123,6 +123,7 @@
+         virtual std::optional<float> getControlPortValue (uint32_t index) const = 0;
+         virtual bool setControlPortValue (uint32_t index, float value) = 0;
+         virtual bool restoreState (const MemoryBlock&) = 0;
++        virtual bool loadFactoryPreset (int index) = 0;
+     };
+ 
+     /** Can be used to retrieve information about a VST that is wrapped by an AudioProcessor. */
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
+@@ -2163,10 +2163,9 @@
+ 
+     const LilvState* get() const noexcept { return state.get(); }
+ 
+-    void restore (InstanceWithSupports& instance, PortMap& portMap) const
+-    {
+-        if (state != nullptr)
+-            SaveRestoreHandle { instance, portMap }.restore (state.get());
++    bool restore (InstanceWithSupports& instance, PortMap& portMap) const
++    {
++        return state == nullptr || SaveRestoreHandle { instance, portMap }.restore (state.get());
+     }
+ 
+     std::string toString (LilvWorld* world, LV2_URID_Map* map, LV2_URID_Unmap* unmap, const char* uri) const
+@@ -2182,7 +2181,7 @@
+ 
+     String getLabel() const
+     {
+-        return String::fromUTF8 (lilv_state_get_label (state.get()));
++        return state != nullptr ? String::fromUTF8 (lilv_state_get_label (state.get())) : String{};
+     }
+ 
+     void setLabel (const String& label)
+@@ -2215,14 +2214,14 @@
+                                                                features ) };
+         }
+ 
+-        void restore (const LilvState* stateIn)
+-        {
+-            lilv_state_restore (stateIn,
++        bool restore (const LilvState* stateIn)
++        {
++            return lilv_state_restore_checked (stateIn,
+                                 instance,
+                                 setPortValue,
+                                 this,
+                                 0,
+-                                features);
++                                features) == LV2_STATE_SUCCESS;
+         }
+ 
+     private:
+@@ -3569,7 +3568,41 @@
+ 
+     bool restoreState (const MemoryBlock& state) override
+     {
+-        return setStateInformationImpl (state.getData(), (int) state.getSize(), ConcurrentWithAudioCallback::yes);
++        const ScopedLock lock (getCallbackLock());
++        MemoryBlock previous;
++        getStateInformation (previous);
++
++        if (setStateInformationImpl (state.getData(), (int) state.getSize(), ConcurrentWithAudioCallback::no))
++            return true;
++
++        setStateInformationImpl (previous.getData(), (int) previous.getSize(), ConcurrentWithAudioCallback::no);
++        return false;
++    }
++
++    bool loadFactoryPreset (int index) override
++    {
++        JUCE_ASSERT_MESSAGE_THREAD;
++
++        if (! isPositiveAndBelow (index, presetUris.size()))
++            return false;
++
++        auto state = loadStateWithUri (presetUris[(size_t) index]);
++
++        if (state.get() == nullptr)
++            return false;
++
++        const ScopedLock lock (getCallbackLock());
++        MemoryBlock previous;
++        getStateInformation (previous);
++
++        if (applyStateWithAppropriateLocking (std::move (state), ConcurrentWithAudioCallback::no))
++        {
++            lastAppliedPreset = index;
++            return true;
++        }
++
++        setStateInformationImpl (previous.getData(), (int) previous.getSize(), ConcurrentWithAudioCallback::no);
++        return false;
+     }
+ 
+     void fillInPluginDescription (PluginDescription& d) const override { d = description; }
+@@ -3677,12 +3710,7 @@
+     {
+         JUCE_ASSERT_MESSAGE_THREAD;
+ 
+-        if (! isPositiveAndBelow (newProgram, presetUris.size()))
+-            return;
+-
+-        lastAppliedPreset = newProgram;
+-        applyStateWithAppropriateLocking (loadStateWithUri (presetUris[(size_t) newProgram]),
+-                                          ConcurrentWithAudioCallback::yes);
++        loadFactoryPreset (newProgram);
+     }
+ 
+     const String getProgramName (int program) override
+@@ -3731,7 +3759,8 @@
+ 
+     void setStateInformation (const void* data, int size) override
+     {
+-        setStateInformationImpl (data, size, ConcurrentWithAudioCallback::yes);
++        if (data != nullptr && size > 0)
++            restoreState (MemoryBlock { data, (size_t) size });
+     }
+ 
+     void setNonRealtime (bool newValue) noexcept override
+@@ -3838,8 +3867,7 @@
+         if (uri == nullptr || String::fromUTF8 (lilv_node_as_uri (uri)) != description.fileOrIdentifier)
+             return false;
+ 
+-        applyStateWithAppropriateLocking (std::move (state), concurrent);
+-        return true;
++        return applyStateWithAppropriateLocking (std::move (state), concurrent);
+     }
+ 
+     void activate()
+@@ -3886,23 +3914,27 @@
+                  instance->urids.mLV2_ATOM__eventTransfer };
+     }
+ 
+-    void applyStateWithAppropriateLocking (PluginState&& state, ConcurrentWithAudioCallback concurrent)
++    bool applyStateWithAppropriateLocking (PluginState&& state, ConcurrentWithAudioCallback concurrent)
+     {
+         PortMap portStateManager (instance->ports);
+ 
+         // If a plugin supports threadSafeRestore, its restore method is thread-safe
+         // and may be called concurrently with audio class functions.
++        bool restored = false;
+         if (hasThreadSafeRestore || concurrent == ConcurrentWithAudioCallback::no)
+         {
+-            state.restore (*instance, portStateManager);
++            restored = state.restore (*instance, portStateManager);
+         }
+         else
+         {
+             const ScopedLock lock (getCallbackLock());
+-            state.restore (*instance, portStateManager);
+-        }
+-
+-        parameterValues.updateFromControlPorts (controlPortStructure);
++            restored = state.restore (*instance, portStateManager);
++        }
++
++        if (restored)
++            parameterValues.updateFromControlPorts (controlPortStructure);
++
++        return restored;
+     }
+ 
+     PluginState loadStateWithUri (const String& str)

@@ -1,0 +1,11 @@
+--- a/modules/tracktion_engine/playback/graph/tracktion_NodeRenderContext.cpp
++++ b/modules/tracktion_engine/playback/graph/tracktion_NodeRenderContext.cpp
+@@ -427,7 +427,7 @@
+     // Prepare buffer to use
+     auto blockSizeSamples = (int) block.getNumFrames();
+ 
+-    juce::AudioBuffer<float> buffer (block.data.channels, numOutputChans, blockSizeSamples);
++    auto buffer = tracktion::graph::toAudioBuffer (block.getFirstChannels (static_cast<choc::buffer::ChannelCount> (numOutputChans)));
+ 
+     // Apply dithering and mag/rms analysis
+     if (r.ditheringEnabled && r.bitDepth < 32)

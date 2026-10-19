@@ -1,0 +1,231 @@
+--- a/modules/juce_audio_processors_headless/format_types/juce_AudioUnitPluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_AudioUnitPluginFormatImpl.h
+@@ -37,6 +37,7 @@
+ #if JUCE_INTERNAL_HAS_AU
+ 
+ #include <AudioToolbox/AudioUnitUtilities.h>
++#include <thread>
+ 
+ #if JUCE_MAC
+ #include <AudioUnit/AUCocoaUIView.h>
+@@ -567,6 +568,89 @@
+ class AudioUnitPluginWindowCocoa;
+ 
+ //==============================================================================
++class AudioUnitListenerLoop final : public DeletedAtShutdown
++{
++public:
++    static AudioUnitListenerLoop& get()
++    {
++        JUCE_ASSERT_MESSAGE_THREAD
++        if (instance == nullptr)
++            instance = new AudioUnitListenerLoop();
++        return *instance;
++    }
++
++    static void waitForPendingDisposals()
++    {
++        JUCE_ASSERT_MESSAGE_THREAD
++        if (instance != nullptr)
++            instance->flush();
++    }
++
++    void dispose (AUEventListenerRef listener, std::shared_ptr<void> context, AudioUnit unit)
++    {
++        ++pending;
++        auto* self = this;
++        CFRunLoopPerformBlock (loop, kCFRunLoopDefaultMode, ^
++        {
++            AUListenerDispose (listener);
++            MessageManager::callAsync ([self, context, unit]
++            {
++                if (unit != nullptr)
++                    AudioComponentInstanceDispose (unit);
++                --self->pending;
++            });
++        });
++        CFRunLoopWakeUp (loop);
++    }
++
++    CFRunLoopRef getRunLoop() const { return loop; }
++
++private:
++    AudioUnitListenerLoop()
++        : worker ([this]
++        {
++            Thread::setCurrentThreadName ("Audio Unit events");
++            loop = CFRunLoopGetCurrent();
++            CFRunLoopSourceContext sourceContext {};
++            auto source = CFRunLoopSourceCreate (kCFAllocatorDefault, 0, &sourceContext);
++            CFRunLoopAddSource (loop, source, kCFRunLoopDefaultMode);
++            auto* self = this;
++            CFRunLoopPerformBlock (loop, kCFRunLoopDefaultMode, ^ { self->ready.signal(); });
++            // Audio Unit timers can change without waking this run loop.
++            while (!stopping.load())
++                CFRunLoopRunInMode (kCFRunLoopDefaultMode, 0.01, false);
++            CFRunLoopRemoveSource (loop, source, kCFRunLoopDefaultMode);
++            CFRelease (source);
++        })
++    {
++        ready.wait();
++    }
++
++    ~AudioUnitListenerLoop() override
++    {
++        flush();
++        stopping.store (true);
++        CFRunLoopStop (loop);
++        CFRunLoopWakeUp (loop);
++        worker.join();
++        instance = nullptr;
++    }
++
++    void flush()
++    {
++        // Keep the main run loop available for the hosting service.
++        while (pending.load() != 0)
++            CFRunLoopRunInMode (kCFRunLoopDefaultMode, 0.01, true);
++    }
++
++    inline static AudioUnitListenerLoop* instance = nullptr;
++    WaitableEvent ready;
++    CFRunLoopRef loop = nullptr;
++    std::atomic<int> pending { 0 };
++    std::atomic<bool> stopping { false };
++    std::thread worker;
++};
++
+ class AudioUnitPluginInstanceHeadless : public AudioPluginInstance
+                                       , private AudioPluginExtensions::AudioUnitClient
+                                      #ifdef JUCE_INTERNAL_HAS_ARA
+@@ -625,8 +709,11 @@
+ 
+         void updateCachedValueAndNotify (float newValue)
+         {
+-            cachedValue = newValue;
+-            sendValueChangedMessageToListeners (newValue);
++            if (cachedValue != newValue)
++            {
++                cachedValue = newValue;
++                sendValueChangedMessageToListeners (newValue);
++            }
+         }
+ 
+         void setValue (float newValue) override
+@@ -883,13 +970,10 @@
+     // called from the destructor above
+     void cleanup()
+     {
+-        disposeEventListener();
+-
+         if (prepared)
+             releaseResources();
+ 
+-        AudioComponentInstanceDispose (audioUnit);
+-        audioUnit = nullptr;
++        disposeEventListener (std::exchange (audioUnit, nullptr));
+     }
+ 
+     bool initialise (double rate, int blockSize)
+@@ -1942,7 +2026,14 @@
+     HeapBlock<AUChannelInfo> channelInfos;
+ 
+     AudioUnit audioUnit;
++    struct EventListenerContext
++    {
++        AudioUnitPluginInstanceHeadless* owner = nullptr;
++        std::weak_ptr<EventListenerContext> self;
++    };
++
+     AUEventListenerRef eventListenerRef;
++    std::shared_ptr<EventListenerContext> eventListenerContext;
+ 
+     std::map<UInt32, AUInstanceParameter*> paramIDToParameter;
+ 
+@@ -1985,12 +2076,18 @@
+         }
+     }
+ 
+-    void disposeEventListener()
+-    {
+-        if (eventListenerRef != nullptr)
+-        {
+-            AUListenerDispose (eventListenerRef);
+-            eventListenerRef = nullptr;
++    void disposeEventListener (AudioUnit unit = nullptr)
++    {
++        // Posted notifications must not access the instance after this point.
++        if (eventListenerContext != nullptr)
++            eventListenerContext->owner = nullptr;
++        if (auto listener = std::exchange (eventListenerRef, nullptr))
++        {
++            AudioUnitListenerLoop::get().dispose (listener, std::move (eventListenerContext), unit);
++        }
++        else if (unit != nullptr)
++        {
++            AudioComponentInstanceDispose (unit);
+         }
+     }
+ 
+@@ -2001,8 +2098,16 @@
+ 
+         disposeEventListener();
+ 
+-        AUEventListenerCreate (eventListenerCallback, this, CFRunLoopGetMain(),
+-                               kCFRunLoopDefaultMode, 0, 0, &eventListenerRef);
++        eventListenerContext = std::make_shared<EventListenerContext>();
++        eventListenerContext->owner = this;
++        eventListenerContext->self = eventListenerContext;
++        if (AUEventListenerCreate (eventListenerCallback, eventListenerContext.get(),
++                                   AudioUnitListenerLoop::get().getRunLoop(), kCFRunLoopDefaultMode,
++                                   0, 0, &eventListenerRef) != noErr)
++        {
++            eventListenerContext.reset();
++            return;
++        }
+ 
+         for (auto* param : getParameters())
+         {
+@@ -2093,9 +2198,16 @@
+     static void eventListenerCallback (void* userRef, void*, const AudioUnitEvent* event,
+                                        UInt64, AudioUnitParameterValue value)
+     {
+-        JUCE_ASSERT_MESSAGE_THREAD
+         jassert (event != nullptr);
+-        static_cast<AudioUnitPluginInstanceHeadless*> (userRef)->eventCallback (*event, value);
++        auto context = static_cast<EventListenerContext*> (userRef)->self.lock();
++        if (context == nullptr)
++            return;
++        const auto copy = *event;
++        MessageManager::callAsync ([context, copy, value]
++        {
++            if (context->owner != nullptr)
++                context->owner->eventCallback (copy, value);
++        });
+     }
+ 
+     void updateParameterInfo()
+--- a/modules/juce_audio_processors_headless/format_types/juce_AudioUnitPluginFormatHeadless.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_AudioUnitPluginFormatHeadless.h
+@@ -63,6 +63,7 @@
+     bool doesPluginStillExist (const PluginDescription&) override;
+     FileSearchPath getDefaultLocationsToSearch() override;
+     void createARAFactoryAsync (const PluginDescription&, ARAFactoryCreationCallback callback) override;
++    static void waitForPendingDisposals();
+ 
+ private:
+     //==============================================================================
+--- a/modules/juce_audio_processors_headless/format_types/juce_AudioUnitPluginFormatHeadless.mm
++++ b/modules/juce_audio_processors_headless/format_types/juce_AudioUnitPluginFormatHeadless.mm
+@@ -38,6 +38,11 @@
+ 
+ namespace juce
+ {
++
++void AudioUnitPluginFormatHeadless::waitForPendingDisposals()
++{
++    AudioUnitListenerLoop::waitForPendingDisposals();
++}
+ 
+ void AudioUnitPluginFormatHeadless::findAllTypesForFile (OwnedArray<PluginDescription>& results,
+                                                          const String& fileOrIdentifier)

@@ -1,0 +1,50 @@
+--- a/modules/tracktion_graph/utilities/tracktion_AudioFifo.h
++++ b/modules/tracktion_graph/utilities/tracktion_AudioFifo.h
+@@ -101,6 +101,7 @@
+     TRACKTION_NO_TSAN bool readAdding (choc::buffer::ChannelArrayView<float> dest)
+     {
+         jassert (dest.getNumChannels() <= buffer.getNumChannels());
++        auto channels = buffer.getChannelRange ({ 0, dest.getNumChannels() });
+ 
+         auto numFrames = (int) dest.getNumFrames();
+         int start1, size1, start2, size2;
+@@ -109,13 +110,13 @@
+         if (size1 + size2 < numFrames)
+             return false;
+ 
+-        auto fifo1 = buffer.getFrameRange ({ (choc::buffer::FrameCount) start1, (choc::buffer::FrameCount) (start1 + size1) });
++        auto fifo1 = channels.getFrameRange ({ (choc::buffer::FrameCount) start1, (choc::buffer::FrameCount) (start1 + size1) });
+         auto block1 = dest.getStart ((choc::buffer::FrameCount) size1);
+         add (block1, fifo1);
+ 
+         if (size2 != 0)
+         {
+-            auto fifo2 = buffer.getFrameRange ({ (choc::buffer::FrameCount) start2, (choc::buffer::FrameCount) (start2 + size2) });
++            auto fifo2 = channels.getFrameRange ({ (choc::buffer::FrameCount) start2, (choc::buffer::FrameCount) (start2 + size2) });
+             auto block2 = dest.getFrameRange ({ (choc::buffer::FrameCount) size1, (choc::buffer::FrameCount) (size1 + size2) });
+             add (block2, fifo2);
+         }
+@@ -127,6 +128,7 @@
+     TRACKTION_NO_TSAN bool readOverwriting (choc::buffer::ChannelArrayView<float> dest)
+     {
+         jassert (dest.getNumChannels() <= buffer.getNumChannels());
++        auto channels = buffer.getChannelRange ({ 0, dest.getNumChannels() });
+ 
+         auto numFrames = (int) dest.getNumFrames();
+         int start1, size1, start2, size2;
+@@ -135,13 +137,13 @@
+         if (size1 + size2 < numFrames)
+             return false;
+ 
+-        auto fifo1 = buffer.getFrameRange ({ (choc::buffer::FrameCount) start1, (choc::buffer::FrameCount) (start1 + size1) });
++        auto fifo1 = channels.getFrameRange ({ (choc::buffer::FrameCount) start1, (choc::buffer::FrameCount) (start1 + size1) });
+         auto block1 = dest.getStart ((choc::buffer::FrameCount) size1);
+         copy (block1, fifo1);
+ 
+         if (size2 != 0)
+         {
+-            auto fifo2 = buffer.getFrameRange ({ (choc::buffer::FrameCount) start2, (choc::buffer::FrameCount) (start2 + size2) });
++            auto fifo2 = channels.getFrameRange ({ (choc::buffer::FrameCount) start2, (choc::buffer::FrameCount) (start2 + size2) });
+             auto block2 = dest.getFrameRange ({ (choc::buffer::FrameCount) size1, (choc::buffer::FrameCount) (size1 + size2) });
+             copy (block2, fifo2);
+         }

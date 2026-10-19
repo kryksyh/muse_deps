@@ -1,0 +1,72 @@
+--- a/modules/tracktion_engine/timestretch/tracktion_TimeStretch.cpp
++++ b/modules/tracktion_engine/timestretch/tracktion_TimeStretch.cpp
+@@ -741,6 +741,7 @@
+                                getOptionFlags (percussive, preserveFormants)),
+           samplesPerOutputBuffer (samplesPerBlock)
+     {
++        rubberBandStretcher.setMaxProcessSize ((size_t) maxFramesNeeded);
+     }
+ 
+     bool isOk() const override
+@@ -817,24 +818,7 @@
+         jassert (numSamples <= getFramesNeeded());
+         rubberBandStretcher.process (inChannels, (size_t) numSamples, false);
+ 
+-        // Once there is output, read this in to the output buffer
+-        int numAvailable = rubberBandStretcher.available();
+-        jassert (numAvailable >= 0);
+-
+-        if (numSamplesToDrop > 0)
+-        {
+-            auto numToDropThisTime = std::min (numSamplesToDrop, std::min (numAvailable, samplesPerOutputBuffer));
+-            rubberBandStretcher.retrieve (outChannels, (size_t) numToDropThisTime);
+-            numSamplesToDrop -= numToDropThisTime;
+-            jassert (numSamplesToDrop >= 0);
+-
+-            numAvailable -= numToDropThisTime;
+-        }
+-
+-        if (numAvailable > 0)
+-            return (int) rubberBandStretcher.retrieve (outChannels, (size_t) std::min (numAvailable, samplesPerOutputBuffer));
+-
+-        return 0;
++        return retrieveOutput (outChannels);
+     }
+ 
+     int flush (float* const* outChannels) override
+@@ -847,17 +831,28 @@
+             hasDoneFinalBlock = true;
+         }
+ 
+-        // Then get the rest of the data out of the stretcher
+-        const int numAvailable = rubberBandStretcher.available();
+-        const int numThisBlock = std::min (numAvailable, samplesPerOutputBuffer);
+-
+-        if (numThisBlock > 0)
+-            return (int) rubberBandStretcher.retrieve (outChannels, (size_t) numThisBlock);
++        return retrieveOutput (outChannels);
++    }
++
++private:
++    int retrieveOutput (float* const* outChannels)
++    {
++        int numAvailable = rubberBandStretcher.available();
++
++        while (numSamplesToDrop > 0 && numAvailable > 0)
++        {
++            const int discard = std::min (numSamplesToDrop, std::min (numAvailable, samplesPerOutputBuffer));
++            rubberBandStretcher.retrieve (outChannels, (size_t) discard);
++            numSamplesToDrop -= discard;
++            numAvailable -= discard;
++        }
++
++        if (numAvailable > 0)
++            return (int) rubberBandStretcher.retrieve (outChannels, (size_t) std::min (numAvailable, samplesPerOutputBuffer));
+ 
+         return 0;
+     }
+ 
+-private:
+     RubberBand::RubberBandStretcher rubberBandStretcher;
+     const int maxFramesNeeded = 8192;
+     const int samplesPerOutputBuffer = 0;

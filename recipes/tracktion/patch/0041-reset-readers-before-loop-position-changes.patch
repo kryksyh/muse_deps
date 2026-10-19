@@ -1,0 +1,15 @@
+--- a/modules/tracktion_engine/playback/graph/tracktion_WaveNode.cpp
++++ b/modules/tracktion_engine/playback/graph/tracktion_WaveNode.cpp
+@@ -1164,11 +1164,10 @@
+         else
+             resamplerReader->setSpeedRatio (blockSpeedRatio);
+ 
+-        setPosition (tr.getStart());
+-
+         if (! isContiguous)
+             reset();
+ 
++        setPosition (tr.getStart());
+         return readSamples (destBuffer);
+     }
+ 

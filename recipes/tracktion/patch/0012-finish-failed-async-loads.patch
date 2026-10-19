@@ -1,0 +1,10 @@
+--- a/modules/tracktion_engine/plugins/external/tracktion_ExternalPlugin.cpp
++++ b/modules/tracktion_engine/plugins/external/tracktion_ExternalPlugin.cpp
+@@ -1946,6 +1946,7 @@
+ {
+     if (! newInstance)
+     {
++        isAsyncInitialising = false;
+         TRACKTION_LOG_ERROR (loadError);
+         return;
+     }

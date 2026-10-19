@@ -1,0 +1,11 @@
+diff --git a/modules/tracktion_engine/playback/devices/tracktion_WaveInputDevice.cpp b/modules/tracktion_engine/playback/devices/tracktion_WaveInputDevice.cpp
+--- a/modules/tracktion_engine/playback/devices/tracktion_WaveInputDevice.cpp
++++ b/modules/tracktion_engine/playback/devices/tracktion_WaveInputDevice.cpp
+@@ -1280,6 +1280,7 @@
+ 
+                         recordingContext->addBlockToRecord (silence.buffer, 0, silence.buffer.getNumSamples());
+                         recordingContext->adjustSamples = 0;
++                        recordingContext->addBlockToRecord (inputBuffer, 0, numSamples);
+                     }
+                     else if (adjustSamples > 0)
+                     {

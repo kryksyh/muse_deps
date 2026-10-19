@@ -1,0 +1,83 @@
+--- a/modules/juce_audio_processors_headless/utilities/juce_AudioPluginExtensions.h
++++ b/modules/juce_audio_processors_headless/utilities/juce_AudioPluginExtensions.h
+@@ -101,6 +101,7 @@
+         virtual AudioUnit getAudioUnitHandle() const noexcept = 0;
+         virtual bool prepareForEditor() = 0;
+         virtual void editorClosed() = 0;
++        virtual bool restoreState (const MemoryBlock&) = 0;
+     };
+ 
+     /** Can be used to retrieve information about a VST that is wrapped by an AudioProcessor. */
+--- a/modules/juce_audio_processors_headless/format_types/juce_AudioUnitPluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_AudioUnitPluginFormatImpl.h
+@@ -1282,6 +1282,11 @@
+ 
+     AudioUnit getAudioUnitHandle() const noexcept override { return audioUnit; }
+ 
++    bool restoreState (const MemoryBlock& state) override
++    {
++        return restoreState (state.getData(), (int) state.getSize());
++    }
++
+     bool prepareForEditor() override
+     {
+         JUCE_ASSERT_MESSAGE_THREAD
+@@ -1754,25 +1759,7 @@
+ 
+     void setCurrentProgramStateInformation (const void* data, int sizeInBytes) override
+     {
+-        CFUniquePtr<CFReadStreamRef> stream (CFReadStreamCreateWithBytesNoCopy (kCFAllocatorDefault, (const UInt8*) data,
+-                                                                                sizeInBytes, kCFAllocatorNull));
+-        CFReadStreamOpen (stream.get());
+-
+-        CFPropertyListFormat format = kCFPropertyListBinaryFormat_v1_0;
+-        CFObjectHolder<CFPropertyListRef> propertyList { CFPropertyListCreateWithStream (kCFAllocatorDefault,
+-                                                                                         stream.get(),
+-                                                                                         0,
+-                                                                                         kCFPropertyListImmutable,
+-                                                                                         &format,
+-                                                                                         nullptr) };
+-
+-        if (propertyList.object != nullptr)
+-        {
+-            AudioUnitSetProperty (audioUnit, kAudioUnitProperty_ClassInfo, kAudioUnitScope_Global,
+-                                  0, &propertyList.object, sizeof (propertyList.object));
+-
+-            sendAllParametersChangedEvents();
+-        }
++        restoreState (data, sizeInBytes);
+     }
+ 
+     void refreshParameterList() override
+@@ -1909,6 +1896,31 @@
+     bool isMidiEffect() const override { return isMidiEffectPlugin; }
+ 
+ private:
++    bool restoreState (const void* data, int sizeInBytes)
++    {
++        CFUniquePtr<CFReadStreamRef> stream (CFReadStreamCreateWithBytesNoCopy (kCFAllocatorDefault, (const UInt8*) data,
++                                                                                sizeInBytes, kCFAllocatorNull));
++        CFReadStreamOpen (stream.get());
++
++        CFPropertyListFormat format = kCFPropertyListBinaryFormat_v1_0;
++        CFObjectHolder<CFPropertyListRef> propertyList { CFPropertyListCreateWithStream (kCFAllocatorDefault,
++                                                                                         stream.get(),
++                                                                                         0,
++                                                                                         kCFPropertyListImmutable,
++                                                                                         &format,
++                                                                                         nullptr) };
++
++        if (propertyList.object == nullptr || CFGetTypeID (propertyList.object) != CFDictionaryGetTypeID())
++            return false;
++
++        if (AudioUnitSetProperty (audioUnit, kAudioUnitProperty_ClassInfo, kAudioUnitScope_Global,
++                                  0, &propertyList.object, sizeof (propertyList.object)) != noErr)
++            return false;
++
++        sendAllParametersChangedEvents();
++        return true;
++    }
++
+     bool initialiseEditor() const
+     {
+         if (prepared || editorInitialized)

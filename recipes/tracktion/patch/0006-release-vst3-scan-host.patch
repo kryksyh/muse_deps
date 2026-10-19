@@ -1,0 +1,11 @@
+--- a/modules/juce_audio_processors_headless/format_types/juce_VST3PluginFormatHeadless.cpp
++++ b/modules/juce_audio_processors_headless/format_types/juce_VST3PluginFormatHeadless.cpp
+@@ -74,7 +74,7 @@
+         if (pluginFactory == nullptr)
+             continue;
+ 
+-        VSTComSmartPtr host { new VST3HostContextHeadless(), IncrementRef::yes };
++        VSTComSmartPtr host { new VST3HostContextHeadless(), IncrementRef::no };
+ 
+         for (const auto& d : DescriptionLister::findDescriptionsSlow (*host, *pluginFactory, File (file)))
+             results.add (new PluginDescription (d));

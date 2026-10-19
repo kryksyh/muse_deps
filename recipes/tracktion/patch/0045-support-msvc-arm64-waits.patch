@@ -1,0 +1,26 @@
+--- a/modules/3rd_party/crill/platform.h
++++ b/modules/3rd_party/crill/platform.h
+@@ -10,7 +10,7 @@
+   #define CRILL_ARM 1
+   #define CRILL_32BIT 1
+   #define CRILL_ARM_32BIT 1
+-#elif defined (__arm64__) || defined (__aarch64__)
++#elif defined (__arm64__) || defined (__aarch64__) || defined (_M_ARM64)
+   #define CRILL_ARM 1
+   #define CRILL_64BIT 1
+   #define CRILL_ARM_64BIT 1
+--- a/modules/3rd_party/crill/impl/progressive_backoff_wait_impl.h
++++ b/modules/3rd_party/crill/impl/progressive_backoff_wait_impl.h
+@@ -11,7 +11,11 @@
+ #if CRILL_INTEL
+   #include <emmintrin.h>
+ #elif CRILL_ARM_64BIT
+-  #include <arm_acle.h>
++  #if defined (_MSC_VER)
++    #include <intrin.h>
++  #else
++    #include <arm_acle.h>
++  #endif
+ #endif
+ 
+ namespace crill::impl

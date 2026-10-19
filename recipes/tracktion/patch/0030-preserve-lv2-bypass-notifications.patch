@@ -1,0 +1,20 @@
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
+@@ -2468,7 +2468,7 @@
+             return;
+ 
+         cache.set ((size_t) getParameterIndex(), denormalised, Update::yes);
+-        sendValueChangedMessageToListeners (getRange().convertTo0to1 (denormalised));
++        sendValueChangedMessageToListeners (getValue());
+     }
+ 
+     void setDenormalisedValueWithoutTriggeringUpdate (float denormalised)
+@@ -2477,7 +2477,7 @@
+             return;
+ 
+         cache.set ((size_t) getParameterIndex(), denormalised, Update::no);
+-        sendValueChangedMessageToListeners (getRange().convertTo0to1 (denormalised));
++        sendValueChangedMessageToListeners (getValue());
+     }
+ 
+     float getDenormalisedValue() const noexcept

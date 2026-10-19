@@ -1,0 +1,40 @@
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
+@@ -2464,12 +2464,18 @@
+ 
+     void setDenormalisedValue (float denormalised)
+     {
++        if (getDenormalisedValue() == denormalised)
++            return;
++
+         cache.set ((size_t) getParameterIndex(), denormalised, Update::yes);
+         sendValueChangedMessageToListeners (getRange().convertTo0to1 (denormalised));
+     }
+ 
+     void setDenormalisedValueWithoutTriggeringUpdate (float denormalised)
+     {
++        if (getDenormalisedValue() == denormalised)
++            return;
++
+         cache.set ((size_t) getParameterIndex(), denormalised, Update::no);
+         sendValueChangedMessageToListeners (getRange().convertTo0to1 (denormalised));
+     }
+@@ -3579,7 +3585,10 @@
+         getStateInformation (previous);
+ 
+         if (setStateInformationImpl (state.getData(), (int) state.getSize(), ConcurrentWithAudioCallback::no))
++        {
++            updateHostDisplay (AudioProcessorListener::ChangeDetails{}.withNonParameterStateChanged (true));
+             return true;
++        }
+ 
+         setStateInformationImpl (previous.getData(), (int) previous.getSize(), ConcurrentWithAudioCallback::no);
+         return false;
+@@ -3604,6 +3613,7 @@
+         if (applyStateWithAppropriateLocking (std::move (state), ConcurrentWithAudioCallback::no))
+         {
+             lastAppliedPreset = index;
++            updateHostDisplay (AudioProcessorListener::ChangeDetails{}.withProgramChanged (true).withNonParameterStateChanged (true));
+             return true;
+         }
+ 

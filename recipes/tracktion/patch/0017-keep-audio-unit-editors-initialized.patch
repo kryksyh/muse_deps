@@ -1,0 +1,136 @@
+--- a/modules/juce_audio_processors_headless/utilities/juce_AudioPluginExtensions.h
++++ b/modules/juce_audio_processors_headless/utilities/juce_AudioPluginExtensions.h
+@@ -99,6 +99,8 @@
+     {
+         virtual ~AudioUnitClient() = default;
+         virtual AudioUnit getAudioUnitHandle() const noexcept = 0;
++        virtual bool prepareForEditor() = 0;
++        virtual void editorClosed() = 0;
+     };
+ 
+     /** Can be used to retrieve information about a VST that is wrapped by an AudioProcessor. */
+--- a/modules/juce_audio_processors_headless/format_types/juce_AudioUnitPluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_AudioUnitPluginFormatImpl.h
+@@ -975,8 +975,8 @@
+     // called from the destructor above
+     void cleanup()
+     {
+-        if (prepared)
+-            releaseResources();
++        editorOpen = false;
++        releaseAudioResources();
+ 
+         disposeEventListener (std::exchange (audioUnit, nullptr));
+     }
+@@ -1176,6 +1176,9 @@
+         // You cannot call setBusesLayout when the AudioProcessor is processing.
+         // Call releaseResources first!
+         jassert (! prepared);
++
++        releaseEditorInitialization();
++        const ScopeGuard restoreEditor { [this] { if (editorOpen) initialiseEditor(); } };
+ 
+         bool layoutHasChanged = false;
+ 
+@@ -1279,6 +1282,23 @@
+ 
+     AudioUnit getAudioUnitHandle() const noexcept override { return audioUnit; }
+ 
++    bool prepareForEditor() override
++    {
++        JUCE_ASSERT_MESSAGE_THREAD
++        editorOpen = true;
++        if (initialiseEditor())
++            return true;
++        editorOpen = false;
++        return false;
++    }
++
++    void editorClosed() override
++    {
++        JUCE_ASSERT_MESSAGE_THREAD
++        editorOpen = false;
++        releaseEditorInitialization();
++    }
++
+     //==============================================================================
+     // AudioProcessor methods:
+ 
+@@ -1286,7 +1306,8 @@
+     {
+         if (audioUnit != nullptr)
+         {
+-            releaseResources();
++            releaseAudioResources();
++            const ScopeGuard restoreEditor { [this] { if (editorOpen) initialiseEditor(); } };
+             setPluginCallbacks();
+ 
+             for (int dir = 0; dir < 2; ++dir)
+@@ -1390,17 +1411,9 @@
+ 
+     void releaseResources() override
+     {
+-        if (prepared)
+-        {
+-            resetBuses();
+-            AudioUnitReset (audioUnit, kAudioUnitScope_Global, 0);
+-            AudioUnitUninitialize (audioUnit);
+-
+-            outputBufferList.clear();
+-            prepared = false;
+-        }
+-
+-        incomingMidi.clear();
++        releaseAudioResources();
++        if (editorOpen)
++            initialiseEditor();
+     }
+ 
+     void resetBuses()
+@@ -1896,6 +1909,36 @@
+     bool isMidiEffect() const override { return isMidiEffectPlugin; }
+ 
+ private:
++    bool initialiseEditor() const
++    {
++        if (prepared || editorInitialized)
++            return true;
++        editorInitialized = audioUnit != nullptr && AudioUnitInitialize (audioUnit) == noErr;
++        return editorInitialized;
++    }
++
++    void releaseEditorInitialization() const
++    {
++        if (std::exchange (editorInitialized, false))
++            AudioUnitUninitialize (audioUnit);
++    }
++
++    void releaseAudioResources()
++    {
++        releaseEditorInitialization();
++        if (prepared)
++        {
++            resetBuses();
++            AudioUnitReset (audioUnit, kAudioUnitScope_Global, 0);
++            AudioUnitUninitialize (audioUnit);
++
++            outputBufferList.clear();
++            prepared = false;
++        }
++
++        incomingMidi.clear();
++    }
++
+     //==============================================================================
+     friend class AudioUnitPluginFormat;
+ 
+@@ -1906,6 +1949,9 @@
+     String pluginName, manufacturer, version;
+     String fileOrIdentifier;
+     CriticalSection lock;
++
++    bool editorOpen = false;
++    mutable bool editorInitialized = false;
+ 
+     bool wantsMidiMessages = false, producesMidiMessages = false,
+          wasPlaying = false, prepared = false,

@@ -1,0 +1,94 @@
+--- a/modules/tracktion_engine/utilities/tracktion_EngineBehaviour.h
++++ b/modules/tracktion_engine/utilities/tracktion_EngineBehaviour.h
+@@ -86,6 +86,12 @@
+ 
+     //==============================================================================
+     // Playback settings
++
++    /// Keeps the requested playback position before or inside a loop.
++    virtual bool shouldKeepPlaybackPositionOnLoopStart()                           { return false; }
++
++    /// Returns the minimum loop duration accepted for playback.
++    virtual TimeDuration getMinimumPlaybackLoopLength()                            { return TimeDuration::fromSeconds (0.01); }
+ 
+     /// You may want to disable auto initialisation of the device manager if you
+     /// are using the engine in a plugin.
+--- a/modules/tracktion_engine/playback/tracktion_TransportControl.cpp
++++ b/modules/tracktion_engine/playback/tracktion_TransportControl.cpp
+@@ -575,7 +575,17 @@
+     {
+         if (! transport.isPaused())
+             if (auto ph = getNodePlayHead())
+-                ph->play (tracktion::toSamples (timeRange, getSampleRate()), looped);
++            {
++                auto samples = tracktion::toSamples (timeRange, getSampleRate());
++
++                if (looped)
++                    samples.setEnd (std::max (samples.getEnd(), samples.getStart() + 1));
++
++                ph->play (samples, looped);
++
++                if (looped)
++                    ph->setLoopRange (true, samples, false);
++            }
+     }
+ 
+     void setRollInToLoop (TimePosition prerollStartTime)
+@@ -663,7 +673,14 @@
+     void setLoopTimes (bool loop, TimeRange newRange)
+     {
+         if (auto ph = getNodePlayHead())
+-            ph->setLoopRange (loop, tracktion::toSamples (newRange, getSampleRate()));
++        {
++            auto samples = tracktion::toSamples (newRange, getSampleRate());
++
++            if (loop)
++                samples.setEnd (std::max (samples.getEnd(), samples.getStart() + 1));
++
++            ph->setLoopRange (loop, samples);
++        }
+     }
+ 
+     void setUserIsDragging (bool isDragging)
+@@ -1148,7 +1165,8 @@
+         if (looping)
+         {
+             auto lr = getLoopRange();
+-            lr = lr.withEnd (std::max (lr.getEnd(), lr.getStart() + 0.001s));
++            const auto minimum = std::min (TimeDuration::fromSeconds (0.001), engine.getEngineBehaviour().getMinimumPlaybackLoopLength());
++            lr = lr.withEnd (std::max (lr.getEnd(), lr.getStart() + minimum));
+             playHeadWrapper->setLoopTimes (true, lr);
+         }
+         else
+@@ -1413,8 +1431,8 @@
+             const auto cursorPos = position.get();
+             const auto loopRange = getLoopRange();
+ 
+-            if (cursorPos < loopRange.getStart()
+-                || cursorPos > loopRange.getEnd() - 0.1s)
++            if (! engine.getEngineBehaviour().shouldKeepPlaybackPositionOnLoopStart()
++                && (cursorPos < loopRange.getStart() || cursorPos > loopRange.getEnd() - 0.1s))
+             {
+                 position = loopRange.getStart();
+             }
+@@ -1422,7 +1440,8 @@
+             transportState->startTime = loopRange.getStart();
+             transportState->endTime   = loopRange.getEnd();
+ 
+-            if (transportState->endTime < transportState->startTime + 0.01s)
++            if (loopRange.isEmpty()
++                || transportState->endTime < transportState->startTime + engine.getEngineBehaviour().getMinimumPlaybackLoopLength())
+             {
+                 engine.getUIBehaviour().showWarningMessage (TRANS("Can't play in loop mode unless the in/out markers are further apart"));
+                 return;
+@@ -1454,6 +1473,10 @@
+         if (playbackContext)
+         {
+             playHeadWrapper->play ({ transportState->startTime, transportState->endTime }, looping);
++
++            if (looping && engine.getEngineBehaviour().shouldKeepPlaybackPositionOnLoopStart()
++                && position.get() < getLoopRange().getStart())
++                playHeadWrapper->setRollInToLoop (position);
+ 
+             // Post the position change to be dispatched otherwise what we're effectively doing is setting
+             // the position for "this" block and it will get incremented the next block, actually starting

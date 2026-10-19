@@ -1,0 +1,89 @@
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
+@@ -1782,7 +1782,7 @@
+ 
+ static File bundlePathFromUri (const char* uri)
+ {
+-    return File { std::unique_ptr<char, FreeString> { lilv_file_uri_parse (uri, nullptr) }.get() };
++    return File { String::fromUTF8 (std::unique_ptr<char, FreeString> { lilv_file_uri_parse (uri, nullptr) }.get()) };
+ }
+ 
+ class Plugins
+@@ -4223,6 +4223,9 @@
+                 world->loadBundle (world->newFileUri (nullptr, pathString.toRawUTF8()));
+             }
+         }
++
++        world->loadSpecifications();
++        world->loadPluginClasses();
+     }
+ 
+     ~Pimpl()
+@@ -4233,11 +4236,19 @@
+     void findAllTypesForFile (OwnedArray<PluginDescription>& result,
+                               const String& identifier)
+     {
++        std::vector<const LilvPlugin*> plugins;
++
+         if (File::isAbsolutePath (identifier))
++        {
+             world->loadBundle (world->newFileUri (nullptr, File::addTrailingSeparator (identifier).toRawUTF8()));
+-
+-        std::vector<const LilvPlugin*> plugins { findPluginByUri (identifier) };
+-        findPluginsByFile (identifier, plugins);
++            world->loadSpecifications();
++            world->loadPluginClasses();
++            findPluginsByFile (identifier, plugins);
++        }
++        else if (const auto* plugin = findPluginByUri (identifier))
++        {
++            plugins.push_back (plugin);
++        }
+ 
+         for (const auto& plugin : plugins)
+         {
+@@ -4294,7 +4305,7 @@
+         StringArray result;
+ 
+         for (const auto* plugin : world->getAllPlugins())
+-            result.add (URL { lv2_host::Plugin { plugin }.getBundleUri().getTyped() }.getLocalFile().getFullPathName());
++            result.add (lv2_host::bundlePathFromUri (lv2_host::Plugin { plugin }.getBundleUri().getTyped()).getFullPathName());
+ 
+         return result;
+     }
+@@ -4580,17 +4591,17 @@
+ 
+         const auto wrapped      = lv2_host::Plugin { plugin };
+         const auto bundle       = wrapped.getBundleUri().getTyped();
+-        const auto bundleFile   = File { StringPtr { lilv_file_uri_parse (bundle, nullptr) }.get() };
++        const auto bundleFile   = lv2_host::bundlePathFromUri (bundle);
+ 
+         const auto numInputs  = wrapped.getNumPortsOfClass (uris.mLV2_CORE__AudioPort, uris.mLV2_CORE__InputPort);
+         const auto numOutputs = wrapped.getNumPortsOfClass (uris.mLV2_CORE__AudioPort, uris.mLV2_CORE__OutputPort);
+ 
+         PluginDescription result;
+-        result.name                 = wrapped.getName().getTyped();
+-        result.descriptiveName      = wrapped.getName().getTyped();
++        result.name                 = String::fromUTF8 (wrapped.getName().getTyped());
++        result.descriptiveName      = String::fromUTF8 (wrapped.getName().getTyped());
+         result.lastFileModTime      = bundleFile.getLastModificationTime();
+         result.lastInfoUpdateTime   = Time::getCurrentTime();
+-        result.manufacturerName     = wrapped.getAuthorName().getTyped();
++        result.manufacturerName     = String::fromUTF8 (wrapped.getAuthorName().getTyped());
+         result.pluginFormatName     = LV2PluginFormatHeadless::getFormatName();
+         result.numInputChannels     = static_cast<int> (numInputs);
+         result.numOutputChannels    = static_cast<int> (numOutputs);
+@@ -4604,11 +4615,11 @@
+                                                    return uri.equals (uris.mLV2_CORE__GeneratorPlugin);
+                                                });
+ 
+-        result.category         = lv2_host::PluginClass { classPtr }.getLabel().getTyped();
++        result.category         = String::fromUTF8 (lv2_host::PluginClass { classPtr }.getLabel().getTyped());
+         result.isInstrument     = isInstrument;
+ 
+         // The plugin URI is required to be globally unique, so a hash of it should be too
+-        result.fileOrIdentifier = wrapped.getUri().getTyped();
++        result.fileOrIdentifier = String::fromUTF8 (wrapped.getUri().getTyped());
+ 
+         const auto uid = DefaultHashFunctions::generateHash (result.fileOrIdentifier, std::numeric_limits<int>::max());;
+         result.deprecatedUid = result.uniqueId = uid;

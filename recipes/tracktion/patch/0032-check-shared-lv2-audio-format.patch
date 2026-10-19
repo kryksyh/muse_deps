@@ -1,0 +1,15 @@
+--- a/modules/tracktion_engine/plugins/external/tracktion_ExternalPlugin.cpp
++++ b/modules/tracktion_engine/plugins/external/tracktion_ExternalPlugin.cpp
+@@ -1234,7 +1234,11 @@
+         // However, with VST3, releaseResources() shuts down the MIDI
+         // input buses and then there is no way to get them back, which
+         // breaks all synths.
+-        if (! isInstancePrepared)
++        const auto* lv2 = pi->getLV2Client();
++        const bool lv2FormatChanged = lv2 != nullptr
++                                   && (lv2->getInstanceSampleRate() != info.sampleRate || pi->getBlockSize() != info.blockSizeSamples);
++
++        if (! isInstancePrepared || lv2FormatChanged)
+         {
+             pi->prepareToPlay (info.sampleRate, info.blockSizeSamples);
+             isInstancePrepared = true;

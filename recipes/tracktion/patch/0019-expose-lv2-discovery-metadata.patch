@@ -1,0 +1,54 @@
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatHeadless.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatHeadless.h
+@@ -72,6 +72,16 @@
+ 
+     FileSearchPath getDefaultLocationsToSearch() override;
+ 
++    struct PluginMetadata
++    {
++        String bundleUri;
++        String classUri;
++        uint32_t numPorts = 0;
++    };
++
++    /** Returns metadata for a plugin that is loaded in this format's world. */
++    std::optional<PluginMetadata> getPluginMetadata (const String& pluginUri) const;
++
+     /** @internal */
+     class Pimpl;
+ 
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatHeadless.cpp
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatHeadless.cpp
+@@ -51,6 +51,11 @@
+     pimpl->findAllTypesForFile (results, fileOrIdentifier);
+ }
+ 
++std::optional<LV2PluginFormatHeadless::PluginMetadata> LV2PluginFormatHeadless::getPluginMetadata (const String& pluginUri) const
++{
++    return pimpl->getPluginMetadata (pluginUri);
++}
++
+ bool LV2PluginFormatHeadless::fileMightContainThisPluginType (const String& fileOrIdentifier)
+ {
+     return pimpl->fileMightContainThisPluginType (fileOrIdentifier);
+--- a/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_LV2PluginFormatImpl.h
+@@ -4248,6 +4248,18 @@
+         }
+     }
+ 
++    std::optional<PluginMetadata> getPluginMetadata (const String& pluginUri)
++    {
++        const auto* ptr = findPluginByUri (pluginUri);
++
++        if (ptr == nullptr)
++            return std::nullopt;
++
++        const lv2_host::Plugin plugin { ptr };
++        const lv2_host::PluginClass pluginClass { plugin.getClass() };
++        return PluginMetadata { plugin.getBundleUri().getTyped(), pluginClass.getUri().getTyped(), plugin.getNumPorts() };
++    }
++
+     bool fileMightContainThisPluginType (const String& file) const
+     {
+         // If the string looks like a URI, then it could be a valid LV2 identifier

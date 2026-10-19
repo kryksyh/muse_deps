@@ -1,0 +1,105 @@
+--- a/modules/juce_audio_processors_headless/utilities/juce_AudioPluginExtensions.h
++++ b/modules/juce_audio_processors_headless/utilities/juce_AudioPluginExtensions.h
+@@ -92,6 +92,7 @@
+         virtual Steinberg::Vst::IEditController* getIEditControllerPtr() const noexcept = 0;
+         virtual MemoryBlock getPreset() const = 0;
+         virtual bool setPreset (const MemoryBlock&) = 0;
++        virtual bool restoreState (const MemoryBlock&) = 0;
+     };
+ 
+     /** Can be used to retrieve information about an AudioUnit that is wrapped by an AudioProcessor. */
+--- a/modules/juce_audio_processors_headless/format_types/juce_VST3PluginFormatImpl.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_VST3PluginFormatImpl.h
+@@ -2845,38 +2845,66 @@
+ 
+     void setStateInformation (const void* data, int sizeInBytes) override
+     {
+-        // The VST3 plugin format requires that get/set state calls are made
+-        // from the message thread.
+-        // We'll lock the message manager here as a safety precaution, but some
+-        // plugins may still misbehave!
+-
++        restoreState (data, sizeInBytes);
++    }
++
++    bool restoreState (const MemoryBlock& state) override
++    {
++        return restoreState (state.getData(), (int) state.getSize());
++    }
++
++    bool restoreState (const void* data, int sizeInBytes)
++    {
+         JUCE_ASSERT_MESSAGE_THREAD
+         MessageManagerLock lock;
+-
+         parameterDispatcher.flush();
+ 
+-        if (auto head = AudioProcessor::getXmlFromBinary (data, sizeInBytes))
+-        {
+-            auto componentStream (createMemoryStreamForState (*head, "IComponent"));
+-
+-            if (componentStream != nullptr && holder->component != nullptr)
+-                holder->component->setState (componentStream.get());
+-
+-            if (editController != nullptr)
++        const auto head = AudioProcessor::getXmlFromBinary (data, sizeInBytes);
++
++        if (head == nullptr || ! head->hasTagName ("VST3PluginState"))
++            return false;
++
++        auto componentStream = createMemoryStreamForState (*head, "IComponent");
++        auto controllerStream = createMemoryStreamForState (*head, "IEditController");
++
++        if ((head->getChildByName ("IComponent") != nullptr && componentStream == nullptr)
++            || (head->getChildByName ("IEditController") != nullptr && controllerStream == nullptr))
++            return false;
++
++        if (componentStream != nullptr)
++        {
++            if (holder->component == nullptr || holder->component->setState (componentStream.get()) != kResultOk)
++                return false;
++        }
++
++        if (editController != nullptr)
++        {
++            if (componentStream != nullptr)
+             {
+-                if (componentStream != nullptr)
+-                {
+-                    Steinberg::int64 result;
+-                    componentStream->seek (0, IBStream::kIBSeekSet, &result);
+-                    setComponentStateAndResetParameters (*componentStream);
+-                }
+-
+-                auto controllerStream (createMemoryStreamForState (*head, "IEditController"));
+-
+-                if (controllerStream != nullptr)
+-                    editController->setState (controllerStream.get());
++                Steinberg::int64 position;
++                componentStream->seek (0, IBStream::kIBSeekSet, &position);
++                const auto result = editController->setComponentState (componentStream.get());
++
++                if (result != kResultOk && result != kNotImplemented)
++                    return false;
+             }
+-        }
++
++            if (controllerStream != nullptr)
++            {
++                const auto result = editController->setState (controllerStream.get());
++
++                if (result != kResultOk && result != kNotImplemented)
++                    return false;
++            }
++
++            resetParameters();
++        }
++        else if (controllerStream != nullptr)
++        {
++            return false;
++        }
++
++        return true;
+     }
+ 
+     void setComponentStateAndResetParameters (MemoryStream& stream)
