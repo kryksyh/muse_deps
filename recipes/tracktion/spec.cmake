@@ -47,6 +47,7 @@ set(DEP_PATCHES
     "tracktion_engine|patch/0044-dispatch-pending-midi-device-updates.patch"
     "tracktion_engine|patch/0045-support-msvc-arm64-waits.patch"
     "tracktion_engine|patch/0046-keep-msvc-arm64-cycle-counter-fallback.patch"
+    "tracktion_engine|patch/0047-provide-track-source-nodes.patch"
 )
 
 set(DEP_SOURCES

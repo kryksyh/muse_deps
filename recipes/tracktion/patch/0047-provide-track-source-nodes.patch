@@ -1,0 +1,49 @@
+--- a/modules/tracktion_engine/utilities/tracktion_EngineBehaviour.h
++++ b/modules/tracktion_engine/utilities/tracktion_EngineBehaviour.h
+@@ -8,8 +8,14 @@
+     Tracktion Engine uses a GPL/commercial licence - see LICENCE.md for details.
+ */
+ 
++namespace tracktion::graph {
++    class Node;
++}
++
+ namespace tracktion::inline engine {
+ 
++struct ProcessState;
++
+ /**
+     Contains the limits of the various elements that can be added to an Edit.
+     @see EngineBehaviour::getEditLimits
+@@ -93,6 +99,9 @@
+     /// Returns the minimum loop duration accepted for playback.
+     virtual TimeDuration getMinimumPlaybackLoopLength()                            { return TimeDuration::fromSeconds (0.01); }
+ 
++    /// Can return a Node that provides the audio of a track in place of its clips.
++    virtual std::unique_ptr<graph::Node> createTrackSourceNode (AudioTrack&, ProcessState&, bool forRendering);
++
+     /// You may want to disable auto initialisation of the device manager if you
+     /// are using the engine in a plugin.
+     virtual bool autoInitialiseDeviceManager()                                      { return true; }
+--- a/modules/tracktion_engine/playback/graph/tracktion_EditNodeBuilder.cpp
++++ b/modules/tracktion_engine/playback/graph/tracktion_EditNodeBuilder.cpp
+@@ -1134,6 +1134,9 @@
+ std::unique_ptr<tracktion::graph::Node> createClipsNode (AudioTrack& at, const TrackMuteState& trackMuteState,
+                                                          const CreateNodeParams& params)
+ {
++    if (auto sourceNode = at.edit.engine.getEngineBehaviour().createTrackSourceNode (at, params.processState, params.forRendering))
++        return sourceNode;
++
+     // Renders play what's heard with nothing launched, so a track left playing its
+     // launcher is silent. Its launcher clips aren't rendered either, so a render
+     // doesn't advance their live launch handles. A render of particular arranger
+@@ -2247,4 +2250,9 @@
+ std::function<std::unique_ptr<tracktion::graph::Node> (std::unique_ptr<tracktion::graph::Node>)> EditNodeBuilder::insertOptionalLastStageNode
+     = [] (std::unique_ptr<tracktion::graph::Node> input) { return input; };
+ 
++std::unique_ptr<graph::Node> EngineBehaviour::createTrackSourceNode (AudioTrack&, ProcessState&, bool)
++{
++    return {};
++}
++
+ } // namespace tracktion::inline engine
