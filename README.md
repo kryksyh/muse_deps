@@ -64,8 +64,8 @@ cmake -DEXTDEPS_OVERRIDE_PORTAUDIO=REBUILD ...
 
 Values are `PREBUILT`, `REBUILD`, `SYSTEM`. A per-dep override beats
 `EXTDEPS_OVERRIDE_ALL`; a global `=SYSTEM` does not force source-delivery deps to
-system mode unless the dep declares a system path. `EXTDEPS_OVERRIDE_ALL` may
-also be an environment variable; per-dep overrides are CMake variables.
+system mode unless the dep declares a system path. Every override may also be
+an environment variable; an explicit `-D` has priority.
 
 ## Dependency Metadata
 
