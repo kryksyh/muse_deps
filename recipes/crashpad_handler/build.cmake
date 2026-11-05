@@ -255,6 +255,10 @@ function(_crashpad_build_one arch outdir)
             message(FATAL_ERROR "[${BD_NAME}] clang not staged: ${_clang_probe}")
         endif()
         string(APPEND _args " clang_path=\"${_clang_dir}\"")
+        if(_clang_sub STREQUAL "clang-linux-amd64")
+            # chromium's clang mis-handles libstdc++ 14's bind_front: llvm/llvm-project#101614
+            string(APPEND _args " extra_cflags_cc=\"-fno-builtin-std-forward_like\"")
+        endif()
     endif()
 
     _bd_run_dir("${SRC}" "${GN}" gen "${outdir}" "--args=${_args}")
